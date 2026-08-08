@@ -1,0 +1,15 @@
+name: bun-effect-api
+description: Bun + Effect reference API (profiles, projects, tasks)
+
+upstreams:
+  api: "3000"
+
+routes:
+  - ./routes.yml
+
+substitute:
+  - package.json
+
+next:
+  - bun install
+  - bun run dev

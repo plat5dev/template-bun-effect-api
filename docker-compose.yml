@@ -1,0 +1,41 @@
+name: bun-effect-api
+
+services:
+  api:
+    build:
+      context: .
+      target: local
+    labels:
+      service.name: api
+      service.namespace: api
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      INTERNAL_PORT: 3001
+      DATABASE_PATH: /data/app.db
+      OTEL_SERVICE_NAME: api
+      OTEL_SERVICE_NAMESPACE: api
+      DEPLOYMENT_ENV: docker
+      # OTLP destination (traces + metrics default on when set):
+      # OTEL_EXPORTER_OTLP_ENDPOINT: http://host.docker.internal:4318
+
+    volumes:
+      - ./src:/app/src
+      - sqlite_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  sqlite_data:
