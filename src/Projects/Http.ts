@@ -17,7 +17,7 @@ export const HttpProjectsLive = HttpApiBuilder.group(Api, "projects", (handlers)
       .handle("create", ({ payload }) =>
         CurrentOrg.pipe(
           Effect.flatMap((org) =>
-            projects.create(org.organizationId, org.membershipId, payload)
+            projects.create(org.organizationId, org.memberId, payload)
           )
         ))
       .handle("get", ({ path }) =>

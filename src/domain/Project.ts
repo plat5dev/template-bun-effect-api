@@ -9,7 +9,7 @@ export class Project extends Model.Class<Project>("Project")({
   organization_id: Model.GeneratedByApp(Schema.String),
   name: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
   description: Schema.String.pipe(Schema.maxLength(2000)),
-  created_by_membership_id: Model.GeneratedByApp(Schema.String),
+  created_by_member_id: Model.GeneratedByApp(Schema.String),
   created_at: Model.GeneratedByApp(Schema.String),
   updated_at: Model.GeneratedByApp(Schema.String)
 }) {}

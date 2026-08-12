@@ -71,8 +71,8 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
     const organizationId = Option.getOrUndefined(
       Headers.get(request.headers, "x-organization-id")
     )
-    const membershipId = Option.getOrUndefined(
-      Headers.get(request.headers, "x-membership-id")
+    const memberId = Option.getOrUndefined(
+      Headers.get(request.headers, "x-member-id")
     )
 
     if (requestId !== null) {
@@ -85,8 +85,8 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
     if (organizationId !== undefined) {
       yield* Effect.annotateCurrentSpan("organization.id", organizationId)
     }
-    if (membershipId !== undefined) {
-      yield* Effect.annotateCurrentSpan("membership.id", membershipId)
+    if (memberId !== undefined) {
+      yield* Effect.annotateCurrentSpan("member.id", memberId)
     }
 
     const exit = yield* Effect.exit(httpApp)
@@ -113,7 +113,7 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
     }
     if (userId !== undefined) line.user_id = userId
     if (organizationId !== undefined) line.organization_id = organizationId
-    if (membershipId !== undefined) line.membership_id = membershipId
+    if (memberId !== undefined) line.member_id = memberId
     if (status >= 500) {
       line.error_kind = "internal"
       line.error_message = "request failed"

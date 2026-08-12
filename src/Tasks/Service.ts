@@ -23,7 +23,7 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
 
     const create = (
       organizationId: string,
-      membershipId: string,
+      memberId: string,
       projectId: string,
       payload: { title: string; status?: TaskStatus }
     ) =>
@@ -36,7 +36,7 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
             project_id: ProjectId.make(projectId),
             title: payload.title,
             status: payload.status ?? "todo",
-            created_by_membership_id: membershipId,
+            created_by_member_id: memberId,
             created_at: now(),
             updated_at: now()
           })

@@ -19,7 +19,7 @@ Gateway authenticates. This service trusts identity headers and owns business lo
 | Resource | Scope | Identity headers |
 |----------|-------|------------------|
 | Profiles | `user` | `X-User-Id` |
-| Projects | `organization` | `X-Organization-Id`, `X-Membership-Id` |
+| Projects | `organization` | `X-Organization-Id`, `X-Member-Id` |
 | Tasks | `organization` (nested under project) | same |
 
 Missing expected identity headers → **500 `INTERNAL_ERROR`** (platform bug), never 401.
@@ -136,7 +136,7 @@ routes.yml             # gateway scopes (route_prefix per scope)
 
 **Do**
 
-- Trust `X-User-Id` on user routes; `X-Organization-Id` + `X-Membership-Id` on org routes
+- Trust `X-User-Id` on user routes; `X-Organization-Id` + `X-Member-Id` on org routes
 - Return Plat5 error envelope (`error.type/code/message/request_id/details`)
 - Log one JSON access line per request (`request_id`, `duration_ms`, identity when present)
 - OTLP traces + metrics when endpoint set; always stdout + `/metrics`

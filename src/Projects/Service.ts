@@ -17,7 +17,7 @@ export class Projects extends Effect.Service<Projects>()("Projects", {
 
     const create = (
       organizationId: string,
-      membershipId: string,
+      memberId: string,
       payload: { name: string; description?: string }
     ) =>
       repo
@@ -27,7 +27,7 @@ export class Projects extends Effect.Service<Projects>()("Projects", {
             organization_id: organizationId,
             name: payload.name,
             description: payload.description ?? "",
-            created_by_membership_id: membershipId,
+            created_by_member_id: memberId,
             created_at: now(),
             updated_at: now()
           })

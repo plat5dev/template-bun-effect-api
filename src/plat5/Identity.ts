@@ -11,7 +11,7 @@ export class CurrentOrg extends Context.Tag("plat5/CurrentOrg")<
   CurrentOrg,
   {
     readonly organizationId: string
-    readonly membershipId: string
+    readonly memberId: string
   }
 >() {}
 
@@ -48,13 +48,13 @@ export const RequireOrgLive = Layer.succeed(
   Effect.gen(function*() {
     const request = yield* HttpServerRequest.HttpServerRequest
     const organizationId = Headers.get(request.headers, "x-organization-id")
-    const membershipId = Headers.get(request.headers, "x-membership-id")
+    const memberId = Headers.get(request.headers, "x-member-id")
     const requestId = Option.getOrNull(Headers.get(request.headers, "x-request-id"))
 
-    if (Option.isNone(organizationId) || Option.isNone(membershipId)) {
+    if (Option.isNone(organizationId) || Option.isNone(memberId)) {
       return yield* Effect.fail(
         internalError(
-          "Missing expected identity headers X-Organization-Id and/or X-Membership-Id",
+          "Missing expected identity headers X-Organization-Id and/or X-Member-Id",
           requestId
         )
       )
@@ -62,7 +62,7 @@ export const RequireOrgLive = Layer.succeed(
 
     return {
       organizationId: organizationId.value,
-      membershipId: membershipId.value
+      memberId: memberId.value
     }
   })
 )

@@ -17,7 +17,7 @@ export const HttpTasksLive = HttpApiBuilder.group(Api, "tasks", (handlers) =>
       .handle("create", ({ path, payload }) =>
         CurrentOrg.pipe(
           Effect.flatMap((org) =>
-            tasks.create(org.organizationId, org.membershipId, path.project_id, payload)
+            tasks.create(org.organizationId, org.memberId, path.project_id, payload)
           )
         ))
       .handle("get", ({ path }) =>
