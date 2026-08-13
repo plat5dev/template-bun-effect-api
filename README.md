@@ -31,7 +31,7 @@ mkdir my-app && cd my-app
 plat5 init --template bun-effect-api --auth -y
 
 bun install
-plat5 start          # gateway :5001, registry :5002, applies routes.yml
+plat5 start          # gateway :5001, registry :5002, applies routes.identity.yml + routes.yml
 bun run dev          # API :3000, health :3001
 ```
 
@@ -129,7 +129,8 @@ src/
   plat5/               # identity, errors, HTTP/DB observability
   domain/              # Profile, Project, Task models
   Profiles|Projects|Tasks/  # Api + Http + Repo + Service
-routes.yml             # gateway scopes (route_prefix per scope)
+routes.identity.yml    # identity public surface (edit or omit)
+routes.yml             # app gateway scopes (route_prefix per scope)
 ```
 
 ## Plat5 contracts (do / don't)
