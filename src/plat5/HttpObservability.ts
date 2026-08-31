@@ -54,8 +54,14 @@ const recordHttpMetrics = (
     )
   )
 
+const requestScheme = (headers: Parameters<typeof Headers.get>[0]): string => {
+  const forwarded = Option.getOrUndefined(Headers.get(headers, "x-forwarded-proto"))
+  const first = forwarded?.split(",")[0]?.trim()
+  return first || "http"
+}
+
 /**
- * Plat5 HTTP observability: JSON access log, OTLP-bound metrics, span attributes.
+ * Plat5 HTTP observability: JSON access log, OTLP-bound metrics, HTTP server span.
  * @see plat5/docs/telemetry.md
  */
 export const httpObservability = HttpMiddleware.make((httpApp) =>
@@ -63,8 +69,13 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
     const request = yield* HttpServerRequest.HttpServerRequest
     const started = performance.now()
     const path = request.url.split("?")[0] ?? request.url
+    const query = request.url.includes("?")
+      ? request.url.slice(request.url.indexOf("?") + 1)
+      : undefined
     const route = normalizeRoute(path)
     const method = request.method
+    const scheme = requestScheme(request.headers)
+    const spanName = `${method} ${route}`
 
     const requestId = Option.getOrNull(Headers.get(request.headers, "x-request-id"))
     const userId = Option.getOrUndefined(Headers.get(request.headers, "x-user-id"))
@@ -75,51 +86,68 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
       Headers.get(request.headers, "x-member-id")
     )
 
-    if (requestId !== null) {
-      yield* Effect.annotateCurrentSpan("request_id", requestId)
+    const attributes: Record<string, string> = {
+      "http.request.method": method,
+      "url.path": path,
+      "url.scheme": scheme,
+      "http.route": route
     }
-    // Only set when gateway injected the header — never invent (telemetry.md).
-    if (userId !== undefined) {
-      yield* Effect.annotateCurrentSpan("user.id", userId)
-    }
-    if (organizationId !== undefined) {
-      yield* Effect.annotateCurrentSpan("organization.id", organizationId)
-    }
-    if (memberId !== undefined) {
-      yield* Effect.annotateCurrentSpan("member.id", memberId)
-    }
+    if (query) attributes["url.query"] = query
 
-    const exit = yield* Effect.exit(httpApp)
-    const response = HttpServerError.exitResponse(exit)
-    const status = response.status
-    const durationMs = Math.round((performance.now() - started) * 100) / 100
-    const durationSeconds = durationMs / 1000
+    return yield* Effect.gen(function*() {
+      if (requestId !== null) {
+        yield* Effect.annotateCurrentSpan("request_id", requestId)
+      }
+      // Only set when gateway injected the header — never invent (telemetry.md).
+      if (userId !== undefined) {
+        yield* Effect.annotateCurrentSpan("user.id", userId)
+      }
+      if (organizationId !== undefined) {
+        yield* Effect.annotateCurrentSpan("organization.id", organizationId)
+      }
+      if (memberId !== undefined) {
+        yield* Effect.annotateCurrentSpan("member.id", memberId)
+      }
 
-    if (status >= 500) {
-      yield* Effect.annotateCurrentSpan("error.kind", "internal")
-    }
+      const exit = yield* Effect.exit(httpApp)
+      const response = HttpServerError.exitResponse(exit)
+      const status = response.status
+      const durationMs = Math.round((performance.now() - started) * 100) / 100
+      const durationSeconds = durationMs / 1000
 
-    yield* recordHttpMetrics(method, route, String(status), durationSeconds)
+      yield* Effect.annotateCurrentSpan("http.response.status_code", status)
+      if (status >= 500) {
+        yield* Effect.annotateCurrentSpan("error.kind", "internal")
+        yield* Effect.annotateCurrentSpan("error.type", String(status))
+      }
 
-    const line: Record<string, unknown> = {
-      timestamp: new Date().toISOString(),
-      level: status >= 500 ? "error" : "info",
-      message: "request completed",
-      route: path,
-      method,
-      status,
-      duration_ms: durationMs,
-      request_id: requestId
-    }
-    if (userId !== undefined) line.user_id = userId
-    if (organizationId !== undefined) line.organization_id = organizationId
-    if (memberId !== undefined) line.member_id = memberId
-    if (status >= 500) {
-      line.error_kind = "internal"
-      line.error_message = "request failed"
-    }
+      yield* recordHttpMetrics(method, route, String(status), durationSeconds)
 
-    console.log(JSON.stringify(line))
-    return yield* exit
+      const line: Record<string, unknown> = {
+        timestamp: new Date().toISOString(),
+        level: status >= 500 ? "error" : "info",
+        message: "request completed",
+        route: path,
+        method,
+        status,
+        duration_ms: durationMs,
+        request_id: requestId
+      }
+      if (userId !== undefined) line.user_id = userId
+      if (organizationId !== undefined) line.organization_id = organizationId
+      if (memberId !== undefined) line.member_id = memberId
+      if (status >= 500) {
+        line.error_kind = "internal"
+        line.error_message = "request failed"
+      }
+
+      console.log(JSON.stringify(line))
+      return yield* exit
+    }).pipe(
+      Effect.withSpan(spanName, {
+        kind: "server",
+        attributes
+      })
+    )
   })
 )
