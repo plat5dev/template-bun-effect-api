@@ -54,12 +54,6 @@ const recordHttpMetrics = (
     )
   )
 
-const requestScheme = (headers: Parameters<typeof Headers.get>[0]): string => {
-  const forwarded = Option.getOrUndefined(Headers.get(headers, "x-forwarded-proto"))
-  const first = forwarded?.split(",")[0]?.trim()
-  return first || "http"
-}
-
 /**
  * Plat5 HTTP observability: JSON access log, OTLP-bound metrics, HTTP server span.
  * @see plat5/docs/telemetry.md
@@ -69,12 +63,8 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
     const request = yield* HttpServerRequest.HttpServerRequest
     const started = performance.now()
     const path = request.url.split("?")[0] ?? request.url
-    const query = request.url.includes("?")
-      ? request.url.slice(request.url.indexOf("?") + 1)
-      : undefined
     const route = normalizeRoute(path)
     const method = request.method
-    const scheme = requestScheme(request.headers)
     const spanName = `${method} ${route}`
 
     const requestId = Option.getOrNull(Headers.get(request.headers, "x-request-id"))
@@ -89,10 +79,8 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
     const attributes: Record<string, string> = {
       "http.request.method": method,
       "url.path": path,
-      "url.scheme": scheme,
       "http.route": route
     }
-    if (query) attributes["url.query"] = query
 
     return yield* Effect.gen(function*() {
       if (requestId !== null) {
@@ -118,7 +106,6 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
       yield* Effect.annotateCurrentSpan("http.response.status_code", status)
       if (status >= 500) {
         yield* Effect.annotateCurrentSpan("error.kind", "internal")
-        yield* Effect.annotateCurrentSpan("error.type", String(status))
       }
 
       yield* recordHttpMetrics(method, route, String(status), durationSeconds)
