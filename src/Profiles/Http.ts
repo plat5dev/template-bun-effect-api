@@ -1,7 +1,6 @@
 import { HttpApiBuilder } from "@effect/platform"
 import { Effect, Layer } from "effect"
 import { Api } from "../Api.js"
-import { CurrentUser, RequireUserLive } from "../plat5/Identity.js"
 import { Profiles } from "./Service.js"
 
 export const HttpProfilesLive = HttpApiBuilder.group(Api, "profiles", (handlers) =>
@@ -9,14 +8,7 @@ export const HttpProfilesLive = HttpApiBuilder.group(Api, "profiles", (handlers)
     const profiles = yield* Profiles
 
     return handlers
-      .handle("getMe", () =>
-        CurrentUser.pipe(
-          Effect.flatMap((user) => profiles.getOrCreateMe(user.userId))
-        ))
-      .handle("upsertMe", ({ payload }) =>
-        CurrentUser.pipe(
-          Effect.flatMap((user) => profiles.upsertMe(user.userId, payload))
-        ))
-      .handle("getById", ({ path }) => profiles.getByUserId(path.user_id))
+      .handle("get", ({ path }) => profiles.getOrCreate(path.user_id))
+      .handle("upsert", ({ path, payload }) => profiles.upsert(path.user_id, payload))
   })
-).pipe(Layer.provide([Profiles.Default, RequireUserLive]))
+).pipe(Layer.provide(Profiles.Default))

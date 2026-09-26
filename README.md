@@ -2,7 +2,7 @@
 
 Reference Plat5 business service: **Bun** runtime + package manager, **Effect** (`HttpApi` + `@effect/sql-sqlite-bun`).
 
-Gateway authenticates. This service trusts identity headers and owns business logic only.
+Gateway admits the caller and fills `{subject.*}` into `upstream`. This service trusts that path and owns business logic only. It does not parse `Authorization` or `X-API-Key`, and it does not read identity from headers.
 
 ## Stack
 
@@ -16,13 +16,17 @@ Gateway authenticates. This service trusts identity headers and owns business lo
 
 ## Demo domain
 
-| Resource | Scope | Identity headers |
-|----------|-------|------------------|
-| Profiles | `user` | `X-User-Id` |
-| Projects | `organization` | `X-Organization-Id`, `X-Member-Id` |
-| Tasks | `organization` (nested under project) | same |
+This process listens on the rewritten path.
 
-Missing expected identity headers → **500 `INTERNAL_ERROR`** (platform bug), never 401.
+| Resource | Scope | Credential | Edge | Listen path |
+|----------|-------|------------|------|-------------|
+| Profiles | `user` | user JWT or user API key | `/user/profile` | `/users/{user_id}/profile` |
+| Projects | `member` | member key or member session | `/member/projects` | `/organizations/{organization_id}/members/{member_id}/projects` |
+| Tasks | `member` | member key or member session | `/member/projects/{project_id}/tasks` | `.../projects/{project_id}/tasks` |
+
+`GET` and `PUT` on the profile. Projects and tasks: `GET` and `POST` on the collection; `GET`, `PATCH`, and `DELETE` on `{project_id}` / `{task_id}`.
+
+Profiles are the caller's. Projects and tasks record `created_by_member_id`. Member scope is a member key or member session, not a user JWT. Handlers read `user_id`, `organization_id`, and `member_id` from those path params.
 
 ## Quick start (host app + Plat5 CLI)
 
@@ -126,29 +130,32 @@ src/
   InternalHttp.ts      # health + /metrics on INTERNAL_PORT (tracer off)
   AppConfig.ts         # Effect Config
   Sql.ts + migrations/ # SQLite + migrator
-  plat5/               # identity, errors, HTTP/DB observability
+  plat5/               # errors, HTTP/DB observability
   domain/              # Profile, Project, Task models
   Profiles|Projects|Tasks/  # Api + Http + Repo + Service
 routes.identity.yml    # identity public surface (edit or omit)
-routes.yml             # app gateway scopes (route_prefix per scope)
+routes.yml             # app routes (edge path + upstream)
 ```
 
 ## Plat5 contracts (do / don't)
 
 **Do**
 
-- Trust `X-User-Id` on user routes; `X-Organization-Id` + `X-Member-Id` on org routes
+- Trust the path the gateway wrote. `{subject.*}` is filled into `upstream` before this process sees the request
+- Read `user_id` from `/users/{user_id}/profile` (user scope; edge `GET`/`PUT /user/profile`)
+- Read `organization_id` and `member_id` from `/organizations/{organization_id}/members/{member_id}/...` (member scope; edge `/member/projects...`). A member key or member session, not a user JWT
 - Return Plat5 error envelope (`error.type/code/message/request_id/details`)
-- Log one JSON access line per request (`request_id`, `duration_ms`, identity when present)
+- Log one JSON access line per request (`request_id`, `duration_ms`, subject ids from the path when present)
 - OTLP traces + metrics when endpoint set; always stdout + `/metrics`
-- Publish routes via `routes.yml` → route-registry (`route_prefix`: `/api` user, `/api/organizations/{organization_id}` org)
+- Publish `routes.yml` to route-registry. A route that needs the subject sets `upstream`
 
 **Don't**
 
-- Parse `Authorization` or validate JWTs
+- Parse `Authorization` or `X-API-Key`, or validate JWTs
+- Read identity from request headers
 - Implement CORS (gateway owns it)
 - Set `X-Request-ID` on responses
-- Return 401 for missing identity headers
+- Return 401 — the gateway admits the caller
 
 ## Contract e2e
 

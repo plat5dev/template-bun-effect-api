@@ -1,6 +1,5 @@
 import { Effect, Option } from "effect"
 import { Profile } from "../domain/Profile.js"
-import { notFound } from "../plat5/Errors.js"
 import { ProfilesRepo } from "./Repo.js"
 
 const now = () => new Date().toISOString()
@@ -9,18 +8,7 @@ export class Profiles extends Effect.Service<Profiles>()("Profiles", {
   effect: Effect.gen(function*() {
     const repo = yield* ProfilesRepo
 
-    const getByUserId = (userId: string) =>
-      repo.findByUserId(userId).pipe(
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.fail(notFound("profile", userId)),
-            onSome: Effect.succeed
-          })
-        ),
-        Effect.withSpan("Profiles.getByUserId", { attributes: { userId } })
-      )
-
-    const getOrCreateMe = (userId: string) =>
+    const getOrCreate = (userId: string) =>
       Effect.gen(function*() {
         const existing = yield* repo.findByUserId(userId)
         if (Option.isSome(existing)) {
@@ -36,9 +24,9 @@ export class Profiles extends Effect.Service<Profiles>()("Profiles", {
             updated_at: ts
           })
         )
-      }).pipe(Effect.withSpan("Profiles.getOrCreateMe", { attributes: { userId } }))
+      }).pipe(Effect.withSpan("Profiles.getOrCreate", { attributes: { userId } }))
 
-    const upsertMe = (
+    const upsert = (
       userId: string,
       payload: { display_name: string; bio?: string }
     ) =>
@@ -62,9 +50,9 @@ export class Profiles extends Effect.Service<Profiles>()("Profiles", {
             updated_at: ts
           })
         )
-      }).pipe(Effect.withSpan("Profiles.upsertMe", { attributes: { userId } }))
+      }).pipe(Effect.withSpan("Profiles.upsert", { attributes: { userId } }))
 
-    return { getByUserId, getOrCreateMe, upsertMe } as const
+    return { getOrCreate, upsert } as const
   }),
   dependencies: [ProfilesRepo.Default]
 }) {}

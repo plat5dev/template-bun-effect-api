@@ -2,7 +2,6 @@ import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "@effect/platform"
 import { Schema } from "effect"
 import { Task, TaskStatus } from "../domain/Task.js"
 import { InternalError, NotFound, ValidationFailed } from "../plat5/Errors.js"
-import { RequireOrg } from "../plat5/Identity.js"
 
 const TaskCreate = Schema.Struct({
   title: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
@@ -16,11 +15,13 @@ const TaskUpdate = Schema.Struct({
 
 const ProjectPath = Schema.Struct({
   organization_id: Schema.String,
+  member_id: Schema.String,
   project_id: Schema.String
 })
 
 const TaskPath = Schema.Struct({
   organization_id: Schema.String,
+  member_id: Schema.String,
   project_id: Schema.String,
   task_id: Schema.String
 })
@@ -34,7 +35,7 @@ export class TasksApi extends HttpApiGroup.make("tasks")
       .addError(InternalError)
   )
   .add(
-      HttpApiEndpoint.post("create", "/")
+    HttpApiEndpoint.post("create", "/")
       .setPath(ProjectPath)
       .setPayload(TaskCreate)
       .addSuccess(Task.json, { status: 201 })
@@ -65,8 +66,7 @@ export class TasksApi extends HttpApiGroup.make("tasks")
       .addError(NotFound)
       .addError(InternalError)
   )
-  .middleware(RequireOrg)
-  .prefix("/api/organizations/:organization_id/projects/:project_id/tasks")
+  .prefix("/organizations/:organization_id/members/:member_id/projects/:project_id/tasks")
   .annotate(OpenApi.Title, "Tasks")
-  .annotate(OpenApi.Description, "Project-scoped tasks (organization scope)")
+  .annotate(OpenApi.Description, "Member-scoped tasks")
 {}

@@ -54,6 +54,68 @@ const recordHttpMetrics = (
     )
   )
 
+type SubjectIds = {
+  readonly userId: string | undefined
+  readonly organizationId: string | undefined
+  readonly memberId: string | undefined
+}
+
+const emptySubject: SubjectIds = {
+  userId: undefined,
+  organizationId: undefined,
+  memberId: undefined
+}
+
+const decodeSeg = (seg: string): string => {
+  try {
+    return decodeURIComponent(seg)
+  } catch {
+    return seg
+  }
+}
+
+/** Subject ids from the listen paths, when the URL is one of those paths. */
+const subjectFromPath = (url: string): SubjectIds => {
+  const pathname = (url.split("?")[0] ?? url).replace(/\/$/, "") || "/"
+  const parts = pathname.split("/")
+  const userId = parts[2]
+  if (parts.length === 4 && parts[1] === "users" && parts[3] === "profile" && userId) {
+    return {
+      userId: decodeSeg(userId),
+      organizationId: undefined,
+      memberId: undefined
+    }
+  }
+
+  const organizationId = parts[2]
+  const memberId = parts[4]
+  if (
+    parts[1] !== "organizations" ||
+    parts[3] !== "members" ||
+    parts[5] !== "projects" ||
+    !organizationId ||
+    !memberId
+  ) {
+    return emptySubject
+  }
+
+  const rest = parts.slice(6)
+  const filled = rest.every((seg) => seg !== "")
+  const matched =
+    filled &&
+    (rest.length === 0 ||
+      rest.length === 1 ||
+      (rest.length === 2 && rest[1] === "tasks") ||
+      (rest.length === 3 && rest[1] === "tasks"))
+  if (!matched) return emptySubject
+
+  return {
+    userId: undefined,
+    organizationId: decodeSeg(organizationId),
+    memberId: decodeSeg(memberId)
+  }
+}
+
 /**
  * Plat5 HTTP observability: JSON access log, OTLP-bound metrics, HTTP server span.
  * @see plat5/docs/telemetry.md
@@ -68,13 +130,6 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
     const spanName = `${method} ${route}`
 
     const requestId = Option.getOrNull(Headers.get(request.headers, "x-request-id"))
-    const userId = Option.getOrUndefined(Headers.get(request.headers, "x-user-id"))
-    const organizationId = Option.getOrUndefined(
-      Headers.get(request.headers, "x-organization-id")
-    )
-    const memberId = Option.getOrUndefined(
-      Headers.get(request.headers, "x-member-id")
-    )
 
     const attributes: Record<string, string> = {
       "http.request.method": method,
@@ -86,24 +141,24 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
       if (requestId !== null) {
         yield* Effect.annotateCurrentSpan("request_id", requestId)
       }
-      // Only set when gateway injected the header — never invent (telemetry.md).
-      if (userId !== undefined) {
-        yield* Effect.annotateCurrentSpan("user.id", userId)
-      }
-      if (organizationId !== undefined) {
-        yield* Effect.annotateCurrentSpan("organization.id", organizationId)
-      }
-      if (memberId !== undefined) {
-        yield* Effect.annotateCurrentSpan("member.id", memberId)
-      }
 
       const exit = yield* Effect.exit(httpApp)
       const response = HttpServerError.exitResponse(exit)
       const status = response.status
       const durationMs = Math.round((performance.now() - started) * 100) / 100
       const durationSeconds = durationMs / 1000
+      const subject = subjectFromPath(path)
 
       yield* Effect.annotateCurrentSpan("http.response.status_code", status)
+      if (subject.userId !== undefined) {
+        yield* Effect.annotateCurrentSpan("user.id", subject.userId)
+      }
+      if (subject.organizationId !== undefined) {
+        yield* Effect.annotateCurrentSpan("organization.id", subject.organizationId)
+      }
+      if (subject.memberId !== undefined) {
+        yield* Effect.annotateCurrentSpan("member.id", subject.memberId)
+      }
       if (status >= 500) {
         yield* Effect.annotateCurrentSpan("error.kind", "internal")
       }
@@ -120,9 +175,9 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
         duration_ms: durationMs,
         request_id: requestId
       }
-      if (userId !== undefined) line.user_id = userId
-      if (organizationId !== undefined) line.organization_id = organizationId
-      if (memberId !== undefined) line.member_id = memberId
+      if (subject.userId !== undefined) line.user_id = subject.userId
+      if (subject.organizationId !== undefined) line.organization_id = subject.organizationId
+      if (subject.memberId !== undefined) line.member_id = subject.memberId
       if (status >= 500) {
         line.error_kind = "internal"
         line.error_message = "request failed"

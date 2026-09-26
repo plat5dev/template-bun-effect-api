@@ -1,7 +1,6 @@
 import { HttpApiBuilder } from "@effect/platform"
 import { Effect, Layer } from "effect"
 import { Api } from "../Api.js"
-import { CurrentOrg, RequireOrgLive } from "../plat5/Identity.js"
 import { Tasks } from "./Service.js"
 
 export const HttpTasksLive = HttpApiBuilder.group(Api, "tasks", (handlers) =>
@@ -10,33 +9,16 @@ export const HttpTasksLive = HttpApiBuilder.group(Api, "tasks", (handlers) =>
 
     return handlers
       .handle("list", ({ path }) =>
-        CurrentOrg.pipe(
-          Effect.flatMap((org) => tasks.list(org.organizationId, path.project_id)),
+        tasks.list(path.organization_id, path.project_id).pipe(
           Effect.map((items) => ({ tasks: items }))
         ))
       .handle("create", ({ path, payload }) =>
-        CurrentOrg.pipe(
-          Effect.flatMap((org) =>
-            tasks.create(org.organizationId, org.memberId, path.project_id, payload)
-          )
-        ))
+        tasks.create(path.organization_id, path.member_id, path.project_id, payload))
       .handle("get", ({ path }) =>
-        CurrentOrg.pipe(
-          Effect.flatMap((org) =>
-            tasks.getInProject(org.organizationId, path.project_id, path.task_id)
-          )
-        ))
+        tasks.getInProject(path.organization_id, path.project_id, path.task_id))
       .handle("update", ({ path, payload }) =>
-        CurrentOrg.pipe(
-          Effect.flatMap((org) =>
-            tasks.update(org.organizationId, path.project_id, path.task_id, payload)
-          )
-        ))
+        tasks.update(path.organization_id, path.project_id, path.task_id, payload))
       .handle("remove", ({ path }) =>
-        CurrentOrg.pipe(
-          Effect.flatMap((org) =>
-            tasks.remove(org.organizationId, path.project_id, path.task_id)
-          )
-        ))
+        tasks.remove(path.organization_id, path.project_id, path.task_id))
   })
-).pipe(Layer.provide([Tasks.Default, RequireOrgLive]))
+).pipe(Layer.provide(Tasks.Default))
