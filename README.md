@@ -158,6 +158,3 @@ routes.yml             # app routes (edge path + upstream)
 - Set `X-Request-ID` on responses
 - Return 401 — the gateway admits the caller
 
-## Contract e2e
-
-Contract e2e tests live in `plat5dev/toolbox` (`e2e/`, `bun run test:templates`) and hit profiles / projects / tasks **through the gateway**.
