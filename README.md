@@ -35,7 +35,7 @@ mkdir my-app && cd my-app
 plat5 init --template bun-effect-api --auth -y
 
 bun install
-plat5 start          # gateway :5001, registry :5002, applies routes.identity.yml + routes.yml
+plat5 start          # gateway :5001, registry :5002, applies routes.identity.yml, routes.audit.yml, routes.yml
 bun run dev          # API :3000, health :3001
 ```
 
@@ -135,6 +135,7 @@ src/
   domain/              # Profile, Project, Task models
   Profiles|Projects|Tasks/  # Api + Http + Repo + Service
 routes.identity.yml    # identity public surface (edit or omit)
+routes.audit.yml       # GET /org/audit-events (omit with AUDIT_ENABLED=false)
 routes.yml             # app routes (edge path + upstream)
 roles.yml              # roles → labels (member gets projects:write)
 ```
