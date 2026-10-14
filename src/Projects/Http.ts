@@ -13,7 +13,7 @@ export const HttpProjectsLive = HttpApiBuilder.group(Api, "projects", (handlers)
           Effect.map((items) => ({ projects: items }))
         ))
       .handle("create", ({ path, payload }) =>
-        projects.create(path.organization_id, path.member_id, payload))
+        projects.create(path.organization_id, payload))
       .handle("get", ({ path }) => projects.getInOrg(path.organization_id, path.project_id))
       .handle("update", ({ path, payload }) =>
         projects.update(path.organization_id, path.project_id, payload))

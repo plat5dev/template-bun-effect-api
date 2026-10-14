@@ -57,13 +57,11 @@ const recordHttpMetrics = (
 type SubjectIds = {
   readonly userId: string | undefined
   readonly organizationId: string | undefined
-  readonly memberId: string | undefined
 }
 
 const emptySubject: SubjectIds = {
   userId: undefined,
-  organizationId: undefined,
-  memberId: undefined
+  organizationId: undefined
 }
 
 const decodeSeg = (seg: string): string => {
@@ -82,24 +80,16 @@ const subjectFromPath = (url: string): SubjectIds => {
   if (parts.length === 4 && parts[1] === "users" && parts[3] === "profile" && userId) {
     return {
       userId: decodeSeg(userId),
-      organizationId: undefined,
-      memberId: undefined
+      organizationId: undefined
     }
   }
 
   const organizationId = parts[2]
-  const memberId = parts[4]
-  if (
-    parts[1] !== "organizations" ||
-    parts[3] !== "members" ||
-    parts[5] !== "projects" ||
-    !organizationId ||
-    !memberId
-  ) {
+  if (parts[1] !== "organizations" || parts[3] !== "projects" || !organizationId) {
     return emptySubject
   }
 
-  const rest = parts.slice(6)
+  const rest = parts.slice(4)
   const filled = rest.every((seg) => seg !== "")
   const matched =
     filled &&
@@ -111,8 +101,7 @@ const subjectFromPath = (url: string): SubjectIds => {
 
   return {
     userId: undefined,
-    organizationId: decodeSeg(organizationId),
-    memberId: decodeSeg(memberId)
+    organizationId: decodeSeg(organizationId)
   }
 }
 
@@ -156,9 +145,6 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
       if (subject.organizationId !== undefined) {
         yield* Effect.annotateCurrentSpan("organization.id", subject.organizationId)
       }
-      if (subject.memberId !== undefined) {
-        yield* Effect.annotateCurrentSpan("member.id", subject.memberId)
-      }
       if (status >= 500) {
         yield* Effect.annotateCurrentSpan("error.kind", "internal")
       }
@@ -177,7 +163,6 @@ export const httpObservability = HttpMiddleware.make((httpApp) =>
       }
       if (subject.userId !== undefined) line.user_id = subject.userId
       if (subject.organizationId !== undefined) line.organization_id = subject.organizationId
-      if (subject.memberId !== undefined) line.member_id = subject.memberId
       if (status >= 500) {
         line.error_kind = "internal"
         line.error_message = "request failed"

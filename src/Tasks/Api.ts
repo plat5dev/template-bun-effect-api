@@ -15,13 +15,11 @@ const TaskUpdate = Schema.Struct({
 
 const ProjectPath = Schema.Struct({
   organization_id: Schema.String,
-  member_id: Schema.String,
   project_id: Schema.String
 })
 
 const TaskPath = Schema.Struct({
   organization_id: Schema.String,
-  member_id: Schema.String,
   project_id: Schema.String,
   task_id: Schema.String
 })
@@ -66,7 +64,7 @@ export class TasksApi extends HttpApiGroup.make("tasks")
       .addError(NotFound)
       .addError(InternalError)
   )
-  .prefix("/organizations/:organization_id/members/:member_id/projects/:project_id/tasks")
+  .prefix("/organizations/:organization_id/projects/:project_id/tasks")
   .annotate(OpenApi.Title, "Tasks")
   .annotate(OpenApi.Description, "Member-scoped tasks")
 {}

@@ -13,7 +13,7 @@ export const HttpTasksLive = HttpApiBuilder.group(Api, "tasks", (handlers) =>
           Effect.map((items) => ({ tasks: items }))
         ))
       .handle("create", ({ path, payload }) =>
-        tasks.create(path.organization_id, path.member_id, path.project_id, payload))
+        tasks.create(path.organization_id, path.project_id, payload))
       .handle("get", ({ path }) =>
         tasks.getInProject(path.organization_id, path.project_id, path.task_id))
       .handle("update", ({ path, payload }) =>
