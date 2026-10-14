@@ -1,7 +1,7 @@
 import { HttpApiSchema } from "@effect/platform"
 import { Schema } from "effect"
 
-const fieldError = Schema.Struct({
+const Field = Schema.Struct({
   path: Schema.String,
   message: Schema.String
 })
@@ -14,7 +14,7 @@ export const ValidationFailed = Schema.Struct({
     message: Schema.String,
     request_id: Schema.NullOr(Schema.String),
     details: Schema.Struct({
-      fields: Schema.Array(fieldError)
+      fields: Schema.Array(Field)
     })
   })
 }).annotations(HttpApiSchema.annotations({ status: 422 }))
@@ -80,6 +80,24 @@ export const validationFailed = (
     message: "Request validation failed",
     request_id: requestId,
     details: { fields: [...fields] }
+  }
+})
+
+/** The 422 sentence when nothing more specific applies. */
+export const FALLBACK_VALIDATION = "That doesn't look right."
+
+/** A 422 for one field. No message is the fallback sentence. */
+export const fieldError = (
+  path: string,
+  message = FALLBACK_VALIDATION,
+  requestId: string | null = null
+): ValidationFailed => ({
+  error: {
+    type: "invalid_request_error",
+    code: "VALIDATION_ERROR",
+    message,
+    request_id: requestId,
+    details: { fields: [{ path, message }] }
   }
 })
 

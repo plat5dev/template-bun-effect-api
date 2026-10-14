@@ -2,6 +2,7 @@ import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "@effect/platform"
 import { Schema } from "effect"
 import { Project } from "../domain/Project.js"
 import { InternalError, NotFound, ValidationFailed } from "../plat5/Errors.js"
+import { ListParams } from "../plat5/Pagination.js"
 
 const ProjectCreate = Schema.Struct({
   name: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
@@ -26,8 +27,10 @@ export class ProjectsApi extends HttpApiGroup.make("projects")
   .add(
     HttpApiEndpoint.get("list", "/")
       .setPath(OrganizationPath)
-      .addSuccess(Schema.Struct({ projects: Schema.Array(Project.json) }))
+      .setUrlParams(ListParams)
+      .addSuccess(Schema.Struct({ projects: Schema.Array(Project.json), has_more: Schema.Boolean }))
       .addError(InternalError)
+      .addError(ValidationFailed)
   )
   .add(
     HttpApiEndpoint.post("create", "/")

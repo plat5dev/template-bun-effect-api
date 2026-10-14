@@ -2,6 +2,7 @@ import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "@effect/platform"
 import { Schema } from "effect"
 import { Task, TaskStatus } from "../domain/Task.js"
 import { InternalError, NotFound, ValidationFailed } from "../plat5/Errors.js"
+import { ListParams } from "../plat5/Pagination.js"
 
 const TaskCreate = Schema.Struct({
   title: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
@@ -28,9 +29,11 @@ export class TasksApi extends HttpApiGroup.make("tasks")
   .add(
     HttpApiEndpoint.get("list", "/")
       .setPath(ProjectPath)
-      .addSuccess(Schema.Struct({ tasks: Schema.Array(Task.json) }))
+      .setUrlParams(ListParams)
+      .addSuccess(Schema.Struct({ tasks: Schema.Array(Task.json), has_more: Schema.Boolean }))
       .addError(NotFound)
       .addError(InternalError)
+      .addError(ValidationFailed)
   )
   .add(
     HttpApiEndpoint.post("create", "/")

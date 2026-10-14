@@ -28,6 +28,31 @@ This process listens on the rewritten path.
 
 Profiles are the person's. Projects and tasks are the org's: they store the owner, not who made them (the org's audit log records who did what). Organization scope is a member key or member session, not a user JWT. Handlers read `user_id` and `organization_id` from those path params.
 
+## Lists
+
+Project and task lists page like every Plat5 list (plat5 [`docs/lists.md`](https://github.com/plat5dev/plat5/blob/master/docs/lists.md)). `src/plat5/Pagination.ts` reads the params.
+
+| | |
+|---|---|
+| `limit` | Default 50, max 100. Over the max is clamped. Under 1 or not a number → **422** |
+| `starting_after` | The `id` of the last item on the previous page. Not a ULID → **422** |
+| Answer | `{"projects": [...], "has_more": false}`, in `id` order (oldest first) |
+
+## Audit details
+
+The gateway records each write before it reaches this service. Each write says what it changed on `X-Plat5-Audit-Details`, and a create names its new id on `X-Plat5-Audit-Created` (plat5 [`docs/audit.md`](https://github.com/plat5dev/plat5/blob/master/docs/audit.md#what-a-service-adds)). The gateway stores them with the event and strips them before the client sees the response. `src/plat5/Audit.ts` builds and encodes them; services call it where the old and new values are in hand, and it adds the headers to the current response.
+
+| Write | Details |
+|-------|---------|
+| `POST` projects | `project_id`, `name`. Created: the project id |
+| `PATCH` a project | `name`, `description` as changes |
+| `POST` tasks | `task_id`, `title`, `status`. Created: the task id |
+| `PATCH` a task | `title`, `status` as changes |
+| `PUT` the profile | `display_name`, `bio` as changes |
+| `DELETE` | None: the route and its path say what happened |
+
+A change is `{"from": …, "to": …}`, only for fields that changed; a write that changed nothing sends no header. Never put a secret in either header.
+
 ## Quick start (host app + Plat5 CLI)
 
 ```bash
@@ -35,7 +60,7 @@ mkdir my-app && cd my-app
 plat5 init --template bun-effect-api --auth -y
 
 bun install
-plat5 start          # gateway :5001, registry :5002, applies routes.identity.yml, routes.audit.yml, routes.yml
+plat5 start          # gateway :5001, control plane :5002, applies roles.yml, routes.identity.yml, routes.audit.yml, routes.yml
 bun run dev          # API :3000, health :3001
 ```
 
@@ -131,7 +156,7 @@ src/
   InternalHttp.ts      # health + /metrics on INTERNAL_PORT (tracer off)
   AppConfig.ts         # Effect Config
   Sql.ts + migrations/ # SQLite + migrator
-  plat5/               # errors, HTTP/DB observability
+  plat5/               # errors, audit details, pagination, HTTP/DB observability
   domain/              # Profile, Project, Task models
   Profiles|Projects|Tasks/  # Api + Http + Repo + Service
 routes.identity.yml    # identity public surface (edit or omit)
@@ -148,9 +173,11 @@ roles.yml              # roles → labels (member gets projects:write)
 - Read `user_id` from `/users/{user_id}/profile` (user scope; edge `GET`/`PUT /user/profile`)
 - Read `organization_id` from `/organizations/{organization_id}/...` (organization scope; edge `/org/projects...`). A member key or member session, not a user JWT
 - Return Plat5 error envelope (`error.type/code/message/request_id/details`)
+- Page lists with `limit` / `starting_after` and answer `has_more`
+- Say what a write changed on `X-Plat5-Audit-Details`, and a create's id on `X-Plat5-Audit-Created`
 - Log one JSON access line per request (`request_id`, `duration_ms`, subject ids from the path when present)
 - OTLP traces + metrics when endpoint set; always stdout + `/metrics`
-- Publish `routes.yml` to route-registry. A route that needs the subject sets `upstream`
+- Publish `routes.yml` to the control plane. A route that needs the subject sets `upstream`
 
 **Don't**
 

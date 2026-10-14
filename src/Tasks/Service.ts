@@ -2,7 +2,9 @@ import { Effect, Option } from "effect"
 import { ulid } from "ulid"
 import { ProjectId } from "../domain/Project.js"
 import { Task, TaskId, type TaskStatus } from "../domain/Task.js"
+import * as Audit from "../plat5/Audit.js"
 import { notFound } from "../plat5/Errors.js"
+import { type ListParams, parsePage } from "../plat5/Pagination.js"
 import { Projects } from "../Projects/Service.js"
 import { TasksRepo } from "./Repo.js"
 
@@ -13,10 +15,11 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
     const repo = yield* TasksRepo
     const projects = yield* Projects
 
-    const list = (organizationId: string, projectId: string) =>
+    const list = (organizationId: string, projectId: string, params: ListParams) =>
       Effect.gen(function*() {
         yield* projects.getInOrg(organizationId, projectId)
-        return yield* repo.listByProject(organizationId, ProjectId.make(projectId))
+        const page = yield* parsePage(params)
+        return yield* repo.listByProject(organizationId, ProjectId.make(projectId), page)
       }).pipe(
         Effect.withSpan("Tasks.list", { attributes: { organizationId, projectId } })
       )
@@ -28,7 +31,7 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
     ) =>
       Effect.gen(function*() {
         yield* projects.getInOrg(organizationId, projectId)
-        return yield* repo.insert(
+        const task = yield* repo.insert(
           Task.insert.make({
             id: TaskId.make(ulid()),
             organization_id: organizationId,
@@ -39,6 +42,9 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
             updated_at: now()
           })
         )
+        yield* Audit.setDetails({ task_id: task.id, title: task.title, status: task.status })
+        yield* Audit.setCreated(task.id)
+        return task
       }).pipe(
         Effect.withSpan("Tasks.create", { attributes: { organizationId, projectId } })
       )
@@ -73,12 +79,17 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
     ) =>
       Effect.gen(function*() {
         const task = yield* getInProject(organizationId, projectId, taskId)
-        return yield* repo.update({
+        const updated = yield* repo.update({
           ...task,
           title: payload.title ?? task.title,
           status: payload.status ?? task.status,
           updated_at: now()
         })
+        const changes: Audit.Details = {}
+        Audit.changed(changes, "title", task.title, updated.title)
+        Audit.changed(changes, "status", task.status, updated.status)
+        yield* Audit.setDetails(changes)
+        return updated
       }).pipe(
         Effect.withSpan("Tasks.update", {
           attributes: { organizationId, projectId, taskId }
@@ -89,6 +100,7 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
       Effect.gen(function*() {
         yield* getInProject(organizationId, projectId, taskId)
         yield* repo.deleteById(TaskId.make(taskId))
+        // No audit details: the route and the task id in its path say what happened.
       }).pipe(
         Effect.withSpan("Tasks.remove", {
           attributes: { organizationId, projectId, taskId }

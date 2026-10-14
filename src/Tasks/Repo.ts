@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import type { ProjectId } from "../domain/Project.js"
 import { Task, TaskId } from "../domain/Task.js"
 import { trackDb } from "../plat5/DbMetrics.js"
+import { type Page, trim } from "../plat5/Pagination.js"
 import { SqlLive } from "../Sql.js"
 
 export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
@@ -38,14 +39,18 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
         Effect.withSpan("TasksRepo.delete")
       )
 
-    const listByProject = (organizationId: string, projectId: ProjectId) =>
+    /** One page of the project's tasks in id order, and whether there are more. */
+    const listByProject = (organizationId: string, projectId: ProjectId, page: Page) =>
       sql`
         SELECT * FROM tasks
         WHERE organization_id = ${organizationId}
           AND project_id = ${projectId}
-        ORDER BY created_at DESC
+          AND id > ${page.startingAfter}
+        ORDER BY id
+        LIMIT ${page.limit + 1}
       `.pipe(
         Effect.flatMap(Schema.decodeUnknown(Schema.Array(Task))),
+        Effect.map((rows) => trim(rows, page)),
         Effect.orDie,
         trackDb("list"),
         Effect.withSpan("TasksRepo.listByProject", {

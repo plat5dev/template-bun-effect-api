@@ -8,9 +8,9 @@ export const HttpProjectsLive = HttpApiBuilder.group(Api, "projects", (handlers)
     const projects = yield* Projects
 
     return handlers
-      .handle("list", ({ path }) =>
-        projects.list(path.organization_id).pipe(
-          Effect.map((items) => ({ projects: items }))
+      .handle("list", ({ path, urlParams }) =>
+        projects.list(path.organization_id, urlParams).pipe(
+          Effect.map(({ hasMore, items }) => ({ projects: items, has_more: hasMore }))
         ))
       .handle("create", ({ path, payload }) =>
         projects.create(path.organization_id, payload))

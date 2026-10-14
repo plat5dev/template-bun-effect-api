@@ -2,6 +2,7 @@ import { Model, SqlClient } from "@effect/sql"
 import { Effect, Schema } from "effect"
 import { Project, ProjectId } from "../domain/Project.js"
 import { trackDb } from "../plat5/DbMetrics.js"
+import { type Page, trim } from "../plat5/Pagination.js"
 import { SqlLive } from "../Sql.js"
 
 export class ProjectsRepo extends Effect.Service<ProjectsRepo>()("Projects/Repo", {
@@ -37,13 +38,16 @@ export class ProjectsRepo extends Effect.Service<ProjectsRepo>()("Projects/Repo"
         Effect.withSpan("ProjectsRepo.delete")
       )
 
-    const listByOrganization = (organizationId: string) =>
+    /** One page of the org's projects in id order, and whether there are more. */
+    const listByOrganization = (organizationId: string, page: Page) =>
       sql`
         SELECT * FROM projects
-        WHERE organization_id = ${organizationId}
-        ORDER BY created_at DESC
+        WHERE organization_id = ${organizationId} AND id > ${page.startingAfter}
+        ORDER BY id
+        LIMIT ${page.limit + 1}
       `.pipe(
         Effect.flatMap(Schema.decodeUnknown(Schema.Array(Project))),
+        Effect.map((rows) => trim(rows, page)),
         Effect.orDie,
         trackDb("list"),
         Effect.withSpan("ProjectsRepo.listByOrganization", {
