@@ -4,6 +4,8 @@ Reference Plat5 business service: **Bun** runtime + package manager, **Effect** 
 
 Gateway admits the caller and fills `{subject.*}` into `upstream`. This service trusts that path and owns business logic only. It does not parse `Authorization` or `X-API-Key`, and it does not read identity from headers.
 
+That trust is the security model: **nothing but the gateway may reach this service.** Anyone who can call it directly can name any org in the path. Locally, `plat5 start` puts the container on the Plat5 network, the gateway calls it as `http://api:3000`, and the host port is bound to `127.0.0.1` for your own curls. In production, don't publish the port at all.
+
 ## Stack
 
 | Piece | Choice |
@@ -176,7 +178,7 @@ roles.yml              # roles → labels (member gets projects:write)
 
 **Do**
 
-- Trust the path the gateway wrote. `{subject.*}` is filled into `upstream` before this process sees the request
+- Trust the path the gateway wrote. `{subject.*}` is filled into `upstream` before this process sees the request. So nothing but the gateway may reach this service
 - Read `user_id` from `/users/{user_id}/profile` (user scope; edge `GET`/`PUT /user/profile`)
 - Read `organization_id` from `/organizations/{organization_id}/...` (organization scope; edge `/org/projects...`). A member key or member session, not a user JWT
 - Return Plat5 error envelope (`error.type/code/message/request_id/details`)
