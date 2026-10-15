@@ -3,9 +3,9 @@ import { Schema } from "effect"
 import { Profile } from "../domain/Profile.js"
 import { InternalError, ValidationFailed } from "../plat5/Errors.js"
 
+// No name here: the person's name is identity's (GET /user), shown in every org.
 const ProfileUpdate = Schema.Struct({
-  display_name: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
-  bio: Schema.optional(Schema.String.pipe(Schema.maxLength(2000)))
+  bio: Schema.String.pipe(Schema.maxLength(2000))
 })
 
 const UserPath = Schema.Struct({

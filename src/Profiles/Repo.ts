@@ -37,7 +37,6 @@ export class ProfilesRepo extends Effect.Service<ProfilesRepo>()("Profiles/Repo"
         if (Option.isSome(existing)) {
           return yield* update({
             ...existing.value,
-            display_name: row.display_name,
             bio: row.bio,
             updated_at: row.updated_at
           })
