@@ -1,6 +1,6 @@
 import { metrics } from "@opentelemetry/api"
 
-/** Minimum process metrics per plat5/docs/telemetry.md (scrape path). */
+/** Minimum process metrics per plat5 docs/reference/telemetry.md (scrape path). */
 export const registerProcessMetrics = (): void => {
   const meter = metrics.getMeter("process")
   const startTime = Date.now() / 1000

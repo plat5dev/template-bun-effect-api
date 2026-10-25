@@ -24,7 +24,9 @@ export class Profiles extends Effect.Service<Profiles>()("Profiles", {
             updated_at: ts
           })
         )
-      }).pipe(Effect.withSpan("Profiles.getOrCreate", { attributes: { userId } }))
+      }).pipe(
+        Effect.withSpan("Profiles.getOrCreate", { attributes: { "plat5.user_id": userId } })
+      )
 
     const upsert = (
       userId: string,
@@ -58,7 +60,9 @@ export class Profiles extends Effect.Service<Profiles>()("Profiles", {
         const changes: Audit.Details = { bio: { from: null, to: created.bio } }
         yield* Audit.setDetails(changes)
         return created
-      }).pipe(Effect.withSpan("Profiles.upsert", { attributes: { userId } }))
+      }).pipe(
+        Effect.withSpan("Profiles.upsert", { attributes: { "plat5.user_id": userId } })
+      )
 
     return { getOrCreate, upsert } as const
   }),

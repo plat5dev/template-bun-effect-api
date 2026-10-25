@@ -9,11 +9,10 @@ import { Api } from "./Api.js"
 import { AppConfig } from "./AppConfig.js"
 import { httpObservability } from "./plat5/HttpObservability.js"
 import { HttpProfilesLive } from "./Profiles/Http.js"
-import { HttpProjectsLive } from "./Projects/Http.js"
 import { HttpTasksLive } from "./Tasks/Http.js"
 
 const ApiLive = HttpApiBuilder.api(Api).pipe(
-  Layer.provide([HttpProfilesLive, HttpProjectsLive, HttpTasksLive])
+  Layer.provide([HttpProfilesLive, HttpTasksLive])
 )
 
 export const PublicHttpLive = Layer.unwrapEffect(
@@ -23,7 +22,7 @@ export const PublicHttpLive = Layer.unwrapEffect(
     return HttpApiBuilder.serve(httpObservability).pipe(
       Layer.provide(HttpApiSwagger.layer({ path: "/docs" })),
       Layer.provide(HttpApiBuilder.middlewareOpenApi()),
-      // No CORS — gateway owns it (plat5 gateway-contract)
+      // No CORS: the gateway owns it (plat5 docs/guides/write-a-service.md)
       Layer.provide(ApiLive),
       HttpServer.withLogAddress,
       Layer.provide(BunHttpServer.layer({ port: config.port }))

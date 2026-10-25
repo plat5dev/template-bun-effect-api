@@ -5,6 +5,7 @@ import { dirname } from "node:path"
 import { AppConfig } from "./AppConfig.js"
 import { PublicHttpLive } from "./Http.js"
 import { InternalHttpLive } from "./InternalHttp.js"
+import { LifecycleLive } from "./Lifecycle.js"
 import { SqlLive } from "./Sql.js"
 import { TelemetryLive } from "./Telemetry.js"
 
@@ -13,7 +14,7 @@ const ensureDataDir = Effect.gen(function*() {
   yield* Effect.promise(() => mkdir(dirname(config.databasePath), { recursive: true }))
 })
 
-const MainLive = Layer.mergeAll(PublicHttpLive, InternalHttpLive).pipe(
+const MainLive = Layer.mergeAll(PublicHttpLive, InternalHttpLive, LifecycleLive).pipe(
   Layer.provide(SqlLive),
   Layer.provide(TelemetryLive)
 )

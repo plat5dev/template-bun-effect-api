@@ -1,5 +1,5 @@
 /**
- * What a write changed, for Plat5's audit log (plat5 docs/audit.md#what-a-service-adds).
+ * What a write changed, for Plat5's audit log (plat5 docs/concepts/audit.md#what-a-service-adds).
  *
  * The gateway records every audited request before it reaches this service. A write adds
  * what it changed on `X-Plat5-Audit-Details`, and a create names the id it made on

@@ -1,8 +1,14 @@
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "@effect/platform"
 import { Schema } from "effect"
 import { Task, TaskStatus } from "../domain/Task.js"
-import { InternalError, NotFound, ValidationFailed } from "../plat5/Errors.js"
+import { InternalError, InvalidRequest, NotFound, ValidationFailed } from "../plat5/Errors.js"
 import { ListParams } from "../plat5/Pagination.js"
+
+/**
+ * The caller's member id in the project's tree, from the front door. A create records it
+ * as the task's author, and answers 400 without it.
+ */
+export const MEMBER_HEADER = "x-plat5-member-id"
 
 const TaskCreate = Schema.Struct({
   title: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
@@ -14,13 +20,16 @@ const TaskUpdate = Schema.Struct({
   status: Schema.optional(TaskStatus)
 })
 
+// Optional here, so a create without it is our 400, not a decode error.
+const MemberHeaders = Schema.Struct({
+  [MEMBER_HEADER]: Schema.optional(Schema.String)
+})
+
 const ProjectPath = Schema.Struct({
-  organization_id: Schema.String,
   project_id: Schema.String
 })
 
 const TaskPath = Schema.Struct({
-  organization_id: Schema.String,
   project_id: Schema.String,
   task_id: Schema.String
 })
@@ -31,16 +40,16 @@ export class TasksApi extends HttpApiGroup.make("tasks")
       .setPath(ProjectPath)
       .setUrlParams(ListParams)
       .addSuccess(Schema.Struct({ tasks: Schema.Array(Task.json), has_more: Schema.Boolean }))
-      .addError(NotFound)
       .addError(InternalError)
       .addError(ValidationFailed)
   )
   .add(
     HttpApiEndpoint.post("create", "/")
       .setPath(ProjectPath)
+      .setHeaders(MemberHeaders)
       .setPayload(TaskCreate)
       .addSuccess(Task.json, { status: 201 })
-      .addError(NotFound)
+      .addError(InvalidRequest)
       .addError(InternalError)
       .addError(ValidationFailed)
   )
@@ -67,7 +76,8 @@ export class TasksApi extends HttpApiGroup.make("tasks")
       .addError(NotFound)
       .addError(InternalError)
   )
-  .prefix("/organizations/:organization_id/projects/:project_id/tasks")
+  // A project is a Plat5 node: its id is in the path, from the front door.
+  .prefix("/projects/:project_id/tasks")
   .annotate(OpenApi.Title, "Tasks")
-  .annotate(OpenApi.Description, "Member-scoped tasks")
+  .annotate(OpenApi.Description, "Tasks inside a project")
 {}

@@ -41,6 +41,8 @@ export class AppConfig extends Context.Tag("AppConfig")<
     readonly port: number
     readonly internalPort: number
     readonly databasePath: string
+    /** Identity's internal base URL, for the lifecycle feed. Unset: the feed isn't read. */
+    readonly identityInternalUrl: string | undefined
     readonly serviceName: string
     readonly serviceNamespace: string
     readonly serviceVersion: string
@@ -68,6 +70,7 @@ export class AppConfig extends Context.Tag("AppConfig")<
       const databasePath = yield* Config.string("DATABASE_PATH").pipe(
         Config.withDefault("./data/app.db")
       )
+      const identityInternalUrl = yield* optionalNonEmpty("IDENTITY_INTERNAL_URL")
       const serviceName = yield* Config.string("OTEL_SERVICE_NAME").pipe(Config.withDefault("api"))
       const serviceNamespace = yield* Config.string("OTEL_SERVICE_NAMESPACE").pipe(
         Config.withDefault("api")
@@ -103,6 +106,7 @@ export class AppConfig extends Context.Tag("AppConfig")<
         port,
         internalPort,
         databasePath,
+        identityInternalUrl,
         serviceName,
         serviceNamespace,
         serviceVersion,

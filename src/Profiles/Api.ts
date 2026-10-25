@@ -29,5 +29,5 @@ export class ProfilesApi extends HttpApiGroup.make("profiles")
   )
   .prefix("/users/:user_id/profile")
   .annotate(OpenApi.Title, "Profiles")
-  .annotate(OpenApi.Description, "The caller's profile")
+  .annotate(OpenApi.Description, "The person's own profile")
 {}
