@@ -70,9 +70,9 @@ const decodeSeg = (seg: string): string => {
 
 /**
  * The ids the front door gave this request (plat5 docs/reference/telemetry.md): the user on
- * a user route, the project node and the caller's member on a project route. Log fields use
- * them as named; span attributes add the `plat5.` prefix. The ids are read from the API's
- * own paths, `/users/{user_id}/profile` and `/projects/{project_id}/tasks…`.
+ * a user route, the environment node and the caller's member on an environment route. Log
+ * fields use them as named; span attributes add the `plat5.` prefix. The ids are read from
+ * the API's own paths, `/users/{user_id}/profile` and `/environments/{environment_id}/tasks…`.
  */
 const callerIds = (
   path: string,
@@ -84,7 +84,7 @@ const callerIds = (
   if (id && parts[1] === "users" && parts[3] === "profile" && parts.length === 4) {
     ids.push(["user_id", decodeSeg(id)])
   }
-  if (id && parts[1] === "projects" && parts[3] === "tasks" && parts.length <= 5) {
+  if (id && parts[1] === "environments" && parts[3] === "tasks" && parts.length <= 5) {
     ids.push(["node_id", decodeSeg(id)])
   }
   const memberId = Option.getOrUndefined(Headers.get(headers, "x-plat5-member-id"))

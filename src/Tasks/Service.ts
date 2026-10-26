@@ -8,21 +8,22 @@ import { TasksRepo } from "./Repo.js"
 
 const now = () => new Date().toISOString()
 
-// Every call scopes its lookups by the project id in the path, and checks nothing about
-// the caller or the project: the front door decided who may call, on which project.
+// Every call scopes its lookups by the environment id in the path, and checks nothing
+// about the caller or the environment: the front door decided who may call, on which
+// environment.
 export class Tasks extends Effect.Service<Tasks>()("Tasks", {
   effect: Effect.gen(function*() {
     const repo = yield* TasksRepo
 
-    const list = (projectId: string, params: ListParams) =>
+    const list = (environmentId: string, params: ListParams) =>
       parsePage(params).pipe(
-        Effect.flatMap((page) => repo.listByProject(projectId, page)),
-        Effect.withSpan("Tasks.list", { attributes: { "plat5.node_id": projectId } })
+        Effect.flatMap((page) => repo.listByEnvironment(environmentId, page)),
+        Effect.withSpan("Tasks.list", { attributes: { "plat5.node_id": environmentId } })
       )
 
     /** Records `memberId`, the caller's, as the author. Without one it's a 400. */
     const create = (
-      projectId: string,
+      environmentId: string,
       memberId: string | undefined,
       payload: { title: string; status?: TaskStatus }
     ) =>
@@ -34,7 +35,7 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         const task = yield* repo.insert(
           Task.insert.make({
             id: TaskId.make(ulid().toLowerCase()),
-            project_id: projectId,
+            environment_id: environmentId,
             title: payload.title,
             status: payload.status ?? "todo",
             created_by: memberId,
@@ -46,30 +47,30 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         yield* Audit.setCreated(task.id)
         return task
       }).pipe(
-        Effect.withSpan("Tasks.create", { attributes: { "plat5.node_id": projectId } })
+        Effect.withSpan("Tasks.create", { attributes: { "plat5.node_id": environmentId } })
       )
 
-    /** The task, or a 404 when there is none by that id in the project. */
-    const getInProject = (projectId: string, taskId: string) =>
+    /** The task, or a 404 when there is none by that id in the environment. */
+    const getInEnvironment = (environmentId: string, taskId: string) =>
       Effect.gen(function*() {
-        const task = yield* repo.findInProject(projectId, TaskId.make(taskId))
+        const task = yield* repo.findInEnvironment(environmentId, TaskId.make(taskId))
         if (task === undefined) {
           return yield* Effect.fail(notFound("task", taskId))
         }
         return task
       }).pipe(
-        Effect.withSpan("Tasks.getInProject", {
-          attributes: { "plat5.node_id": projectId, task_id: taskId }
+        Effect.withSpan("Tasks.getInEnvironment", {
+          attributes: { "plat5.node_id": environmentId, task_id: taskId }
         })
       )
 
     const update = (
-      projectId: string,
+      environmentId: string,
       taskId: string,
       payload: { title?: string; status?: TaskStatus }
     ) =>
       Effect.gen(function*() {
-        const task = yield* getInProject(projectId, taskId)
+        const task = yield* getInEnvironment(environmentId, taskId)
         const updated = yield* repo.update({
           ...task,
           title: payload.title ?? task.title,
@@ -83,22 +84,22 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         return updated
       }).pipe(
         Effect.withSpan("Tasks.update", {
-          attributes: { "plat5.node_id": projectId, task_id: taskId }
+          attributes: { "plat5.node_id": environmentId, task_id: taskId }
         })
       )
 
-    const remove = (projectId: string, taskId: string) =>
+    const remove = (environmentId: string, taskId: string) =>
       Effect.gen(function*() {
-        yield* getInProject(projectId, taskId)
+        yield* getInEnvironment(environmentId, taskId)
         yield* repo.deleteById(TaskId.make(taskId))
         // No audit details: the route and the task id in its path say what happened.
       }).pipe(
         Effect.withSpan("Tasks.remove", {
-          attributes: { "plat5.node_id": projectId, task_id: taskId }
+          attributes: { "plat5.node_id": environmentId, task_id: taskId }
         })
       )
 
-    return { list, create, getInProject, update, remove } as const
+    return { list, create, getInEnvironment, update, remove } as const
   }),
   dependencies: [TasksRepo.Default]
 }) {}

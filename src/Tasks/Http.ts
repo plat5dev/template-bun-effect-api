@@ -10,14 +10,14 @@ export const HttpTasksLive = HttpApiBuilder.group(Api, "tasks", (handlers) =>
 
     return handlers
       .handle("list", ({ path, urlParams }) =>
-        tasks.list(path.project_id, urlParams).pipe(
+        tasks.list(path.environment_id, urlParams).pipe(
           Effect.map(({ hasMore, items }) => ({ tasks: items, has_more: hasMore }))
         ))
       .handle("create", ({ headers, path, payload }) =>
-        tasks.create(path.project_id, headers[MEMBER_HEADER], payload))
-      .handle("get", ({ path }) => tasks.getInProject(path.project_id, path.task_id))
+        tasks.create(path.environment_id, headers[MEMBER_HEADER], payload))
+      .handle("get", ({ path }) => tasks.getInEnvironment(path.environment_id, path.task_id))
       .handle("update", ({ path, payload }) =>
-        tasks.update(path.project_id, path.task_id, payload))
-      .handle("remove", ({ path }) => tasks.remove(path.project_id, path.task_id))
+        tasks.update(path.environment_id, path.task_id, payload))
+      .handle("remove", ({ path }) => tasks.remove(path.environment_id, path.task_id))
   })
 ).pipe(Layer.provide(Tasks.Default))

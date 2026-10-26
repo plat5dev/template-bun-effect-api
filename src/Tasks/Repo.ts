@@ -26,14 +26,14 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
         Effect.withSpan("TasksRepo.update")
       )
 
-    /** The task, when it is in the project. */
-    const findInProject = (projectId: string, id: TaskId) =>
-      sql`SELECT * FROM tasks WHERE id = ${id} AND project_id = ${projectId}`.pipe(
+    /** The task, when it is in the environment. */
+    const findInEnvironment = (environmentId: string, id: TaskId) =>
+      sql`SELECT * FROM tasks WHERE id = ${id} AND environment_id = ${environmentId}`.pipe(
         Effect.flatMap(Schema.decodeUnknown(Schema.Array(Task))),
         Effect.map((rows) => rows[0]),
         Effect.orDie,
         trackDb("find"),
-        Effect.withSpan("TasksRepo.findInProject")
+        Effect.withSpan("TasksRepo.findInEnvironment")
       )
 
     const deleteById = (id: TaskId) =>
@@ -43,22 +43,22 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
       )
 
     /**
-     * Deletes every task of a project, for its purge. Deleting none is fine, so it can run
-     * again for the same project.
+     * Deletes every task of an environment, for its purge. Deleting none is fine, so it can
+     * run again for the same environment.
      */
-    const deleteByProject = (projectId: string) =>
-      sql`DELETE FROM tasks WHERE project_id = ${projectId}`.pipe(
+    const deleteByEnvironment = (environmentId: string) =>
+      sql`DELETE FROM tasks WHERE environment_id = ${environmentId}`.pipe(
         Effect.asVoid,
         Effect.orDie,
-        trackDb("delete_by_project"),
-        Effect.withSpan("TasksRepo.deleteByProject")
+        trackDb("delete_by_environment"),
+        Effect.withSpan("TasksRepo.deleteByEnvironment")
       )
 
-    /** One page of the project's tasks in id order, and whether there are more. */
-    const listByProject = (projectId: string, page: Page) =>
+    /** One page of the environment's tasks in id order, and whether there are more. */
+    const listByEnvironment = (environmentId: string, page: Page) =>
       sql`
         SELECT * FROM tasks
-        WHERE project_id = ${projectId} AND id > ${page.startingAfter}
+        WHERE environment_id = ${environmentId} AND id > ${page.startingAfter}
         ORDER BY id
         LIMIT ${page.limit + 1}
       `.pipe(
@@ -66,10 +66,10 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
         Effect.map((rows) => trim(rows, page)),
         Effect.orDie,
         trackDb("list"),
-        Effect.withSpan("TasksRepo.listByProject")
+        Effect.withSpan("TasksRepo.listByEnvironment")
       )
 
-    return { insert, update, findInProject, deleteById, deleteByProject, listByProject } as const
+    return { insert, update, findInEnvironment, deleteById, deleteByEnvironment, listByEnvironment } as const
   }),
   dependencies: [SqlLive]
 }) {}

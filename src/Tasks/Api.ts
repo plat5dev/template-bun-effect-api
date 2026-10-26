@@ -5,8 +5,8 @@ import { InternalError, InvalidRequest, NotFound, ValidationFailed } from "../pl
 import { ListParams } from "../plat5/Pagination.js"
 
 /**
- * The caller's member id in the project's tree, from the front door. A create records it
- * as the task's author, and answers 400 without it.
+ * The caller's member id in the environment's tree, from the front door. A create records
+ * it as the task's author, and answers 400 without it.
  */
 export const MEMBER_HEADER = "x-plat5-member-id"
 
@@ -25,19 +25,19 @@ const MemberHeaders = Schema.Struct({
   [MEMBER_HEADER]: Schema.optional(Schema.String)
 })
 
-const ProjectPath = Schema.Struct({
-  project_id: Schema.String
+const EnvironmentPath = Schema.Struct({
+  environment_id: Schema.String
 })
 
 const TaskPath = Schema.Struct({
-  project_id: Schema.String,
+  environment_id: Schema.String,
   task_id: Schema.String
 })
 
 export class TasksApi extends HttpApiGroup.make("tasks")
   .add(
     HttpApiEndpoint.get("list", "/")
-      .setPath(ProjectPath)
+      .setPath(EnvironmentPath)
       .setUrlParams(ListParams)
       .addSuccess(Schema.Struct({ tasks: Schema.Array(Task.json), has_more: Schema.Boolean }))
       .addError(InternalError)
@@ -45,7 +45,7 @@ export class TasksApi extends HttpApiGroup.make("tasks")
   )
   .add(
     HttpApiEndpoint.post("create", "/")
-      .setPath(ProjectPath)
+      .setPath(EnvironmentPath)
       .setHeaders(MemberHeaders)
       .setPayload(TaskCreate)
       .addSuccess(Task.json, { status: 201 })
@@ -76,8 +76,8 @@ export class TasksApi extends HttpApiGroup.make("tasks")
       .addError(NotFound)
       .addError(InternalError)
   )
-  // A project is a Plat5 node: its id is in the path, from the front door.
-  .prefix("/projects/:project_id/tasks")
+  // An environment is a Plat5 node: its id is in the path, from the front door.
+  .prefix("/environments/:environment_id/tasks")
   .annotate(OpenApi.Title, "Tasks")
-  .annotate(OpenApi.Description, "Tasks inside a project")
+  .annotate(OpenApi.Description, "Tasks inside an environment")
 {}

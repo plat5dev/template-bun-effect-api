@@ -11,7 +11,7 @@ export type TaskStatus = typeof TaskStatus.Type
 // the tree (plat5 docs/concepts/model.md#where-a-field-goes).
 export class Task extends Model.Class<Task>("Task")({
   id: Model.GeneratedByApp(TaskId),
-  project_id: Model.GeneratedByApp(Schema.String),
+  environment_id: Model.GeneratedByApp(Schema.String),
   title: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
   status: TaskStatus,
   created_by: Model.GeneratedByApp(Schema.String),

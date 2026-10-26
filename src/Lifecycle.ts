@@ -1,9 +1,10 @@
 /**
- * Follows identity's lifecycle feed, so the API's data goes when its project does (plat5
- * docs/concepts/lifecycle.md#lifecycle-events).
+ * Follows identity's lifecycle feed, so the API's data goes when its environment does
+ * (plat5 docs/concepts/lifecycle.md#lifecycle-events).
  *
- * The only event it acts on is `node.purged` for a project: that project's tasks are
- * deleted. Tasks are authored, so `member.removed` keeps them, and there is no background
+ * The only event it acts on is `node.purged` for an environment: that environment's tasks
+ * are deleted. A purged project's environments are purged with it, each with its own
+ * event. Tasks are authored, so `member.removed` keeps them, and there is no background
  * work to stop on `node.deleted`. The cursor is the last event id acted on, kept in SQLite
  * and advanced after acting; acting again on the same event changes nothing.
  */
@@ -84,11 +85,11 @@ const consumer = (identityUrl: string) =>
       )
 
     const act = (event: LifecycleEvent) =>
-      event.type !== "node.purged" || event.kind !== "project" || event.node_id === undefined
+      event.type !== "node.purged" || event.kind !== "environment" || event.node_id === undefined
         ? Effect.void
-        : tasks.deleteByProject(event.node_id).pipe(
+        : tasks.deleteByEnvironment(event.node_id).pipe(
           Effect.zipRight(
-            log("info", "purged project's tasks deleted", {
+            log("info", "purged environment's tasks deleted", {
               event_id: event.id,
               node_id: event.node_id
             })
@@ -136,7 +137,7 @@ export const LifecycleLive = Layer.unwrapEffect(
       return Layer.effectDiscard(
         log(
           "warn",
-          "IDENTITY_INTERNAL_URL is unset: not reading the lifecycle feed, so a purged project's tasks are kept"
+          "IDENTITY_INTERNAL_URL is unset: not reading the lifecycle feed, so a purged environment's tasks are kept"
         )
       )
     }
