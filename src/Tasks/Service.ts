@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { ulid } from "ulid"
+import { monotonicFactory } from "ulid"
 import { Task, TaskId, type TaskStatus } from "../domain/Task.js"
 import * as Audit from "../plat5/Audit.js"
 import { invalidRequest, notFound } from "../plat5/Errors.js"
@@ -7,6 +7,9 @@ import { type ListParams, parsePage } from "../plat5/Pagination.js"
 import { TasksRepo } from "./Repo.js"
 
 const now = () => new Date().toISOString()
+
+// Monotonic, so tasks made in the same millisecond still list in the order they were made.
+const ulid = monotonicFactory()
 
 // Every call scopes its lookups by the environment id in the path, and checks nothing
 // about the caller or the environment: the front door decided who may call, on which
