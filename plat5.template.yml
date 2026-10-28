@@ -21,4 +21,4 @@ app:
 # To run the API on your own machine instead: plat5 start -x app, then
 next:
   - bun install
-  - bun run dev
+  - TASK_ASSIGNEE_PERMISSION=project:read bun run dev

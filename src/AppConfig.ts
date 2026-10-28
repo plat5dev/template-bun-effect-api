@@ -1,4 +1,4 @@
-import { Config, Context, Effect, Layer } from "effect"
+import { Config, ConfigError, Context, Effect, Layer } from "effect"
 import { hostname } from "node:os"
 
 const optionalNonEmpty = (name: string) =>
@@ -41,8 +41,16 @@ export class AppConfig extends Context.Tag("AppConfig")<
     readonly port: number
     readonly internalPort: number
     readonly databasePath: string
-    /** Identity's internal base URL, for the lifecycle feed. Unset: the feed isn't read. */
+    /**
+     * Identity's internal base URL, for its tree and user feeds and the assignee check.
+     * Unset: the feeds aren't read, and a task with an assignee is a 503.
+     */
     readonly identityInternalUrl: string | undefined
+    /**
+     * The permission a task's assignee needs on its project: the deployment's name for it,
+     * never the code's. Unset or empty, the API won't start.
+     */
+    readonly taskAssigneePermission: string
     readonly serviceName: string
     readonly serviceNamespace: string
     readonly serviceVersion: string
@@ -71,6 +79,16 @@ export class AppConfig extends Context.Tag("AppConfig")<
         Config.withDefault("./data/app.db")
       )
       const identityInternalUrl = yield* optionalNonEmpty("IDENTITY_INTERNAL_URL")
+      const taskAssigneePermission = yield* optionalNonEmpty("TASK_ASSIGNEE_PERMISSION").pipe(
+        Effect.filterOrFail(
+          (value): value is string => value !== undefined,
+          () =>
+            ConfigError.MissingData(
+              ["TASK_ASSIGNEE_PERMISSION"],
+              "TASK_ASSIGNEE_PERMISSION is unset or empty: set it to the permission an assignee needs on the task's project (the starter's is project:read)"
+            )
+        )
+      )
       const serviceName = yield* Config.string("OTEL_SERVICE_NAME").pipe(Config.withDefault("api"))
       const serviceNamespace = yield* Config.string("OTEL_SERVICE_NAMESPACE").pipe(
         Config.withDefault("api")
@@ -107,6 +125,7 @@ export class AppConfig extends Context.Tag("AppConfig")<
         internalPort,
         databasePath,
         identityInternalUrl,
+        taskAssigneePermission,
         serviceName,
         serviceNamespace,
         serviceVersion,

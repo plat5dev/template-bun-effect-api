@@ -15,15 +15,19 @@ const ApiLive = HttpApiBuilder.api(Api).pipe(
   Layer.provide([HttpProfilesLive, HttpTasksLive])
 )
 
+/** The public API, on whatever HTTP server it's given. */
+export const PublicApiLive = HttpApiBuilder.serve(httpObservability).pipe(
+  Layer.provide(HttpApiSwagger.layer({ path: "/docs" })),
+  Layer.provide(HttpApiBuilder.middlewareOpenApi()),
+  // No CORS: the gateway owns it (plat5 docs/guides/write-a-service.md)
+  Layer.provide(ApiLive)
+)
+
 export const PublicHttpLive = Layer.unwrapEffect(
   Effect.gen(function*() {
     const config = yield* AppConfig
 
-    return HttpApiBuilder.serve(httpObservability).pipe(
-      Layer.provide(HttpApiSwagger.layer({ path: "/docs" })),
-      Layer.provide(HttpApiBuilder.middlewareOpenApi()),
-      // No CORS: the gateway owns it (plat5 docs/guides/write-a-service.md)
-      Layer.provide(ApiLive),
+    return PublicApiLive.pipe(
       HttpServer.withLogAddress,
       Layer.provide(BunHttpServer.layer({ port: config.port }))
     )

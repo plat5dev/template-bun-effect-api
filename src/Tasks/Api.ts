@@ -1,7 +1,13 @@
-import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "@effect/platform"
+import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, OpenApi } from "@effect/platform"
 import { Schema } from "effect"
 import { Task, TaskStatus } from "../domain/Task.js"
-import { InternalError, InvalidRequest, NotFound, ValidationFailed } from "../plat5/Errors.js"
+import {
+  InternalError,
+  InvalidRequest,
+  NotFound,
+  ServiceUnavailable,
+  ValidationFailed
+} from "../plat5/Errors.js"
 import { ListParams } from "../plat5/Pagination.js"
 
 /**
@@ -10,20 +16,50 @@ import { ListParams } from "../plat5/Pagination.js"
  */
 export const MEMBER_HEADER = "x-plat5-member-id"
 
+/**
+ * The environment's project id, from the front door. A write that sets an assignee checks
+ * them on it, and answers 400 without it.
+ */
+export const PROJECT_HEADER = "x-plat5-project-id"
+
+/** Plat5 ids, and this API's, are ULIDs in lowercase. */
+const MemberId = Schema.String.pipe(Schema.pattern(/^[0-7][0-9a-hjkmnp-tv-z]{25}$/))
+
+const AssigneeId = Schema.NullOr(MemberId).annotations({
+  description: "A member id in the environment's tree who can see its project, or null for none."
+})
+
 const TaskCreate = Schema.Struct({
   title: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
-  status: Schema.optional(TaskStatus)
+  status: Schema.optional(TaskStatus),
+  assignee_id: Schema.optional(AssigneeId)
 })
 
+// assignee_id absent leaves the task's as it is.
 const TaskUpdate = Schema.Struct({
   title: Schema.optional(Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255))),
-  status: Schema.optional(TaskStatus)
+  status: Schema.optional(TaskStatus),
+  assignee_id: Schema.optional(AssigneeId)
 })
 
-// Optional here, so a create without it is our 400, not a decode error.
-const MemberHeaders = Schema.Struct({
-  [MEMBER_HEADER]: Schema.optional(Schema.String)
+// RequireMember has checked the member id by the time these are read: without it a create
+// is our 400. The project id is optional, so a write without an assignee doesn't need it.
+const CreateHeaders = Schema.Struct({
+  [MEMBER_HEADER]: Schema.String,
+  [PROJECT_HEADER]: Schema.optional(Schema.String)
 })
+
+const UpdateHeaders = Schema.Struct({
+  [PROJECT_HEADER]: Schema.optional(Schema.String)
+})
+
+/**
+ * Checks a create's `X-Plat5-Member-Id` before its body is read: without it, a 400 whatever
+ * the body holds.
+ */
+export class RequireMember extends HttpApiMiddleware.Tag<RequireMember>()("Tasks/RequireMember", {
+  failure: InvalidRequest
+}) {}
 
 const EnvironmentPath = Schema.Struct({
   environment_id: Schema.String
@@ -46,12 +82,14 @@ export class TasksApi extends HttpApiGroup.make("tasks")
   .add(
     HttpApiEndpoint.post("create", "/")
       .setPath(EnvironmentPath)
-      .setHeaders(MemberHeaders)
+      .setHeaders(CreateHeaders)
       .setPayload(TaskCreate)
+      .middleware(RequireMember)
       .addSuccess(Task.json, { status: 201 })
       .addError(InvalidRequest)
       .addError(InternalError)
       .addError(ValidationFailed)
+      .addError(ServiceUnavailable)
   )
   .add(
     HttpApiEndpoint.get("get", "/:task_id")
@@ -63,11 +101,14 @@ export class TasksApi extends HttpApiGroup.make("tasks")
   .add(
     HttpApiEndpoint.patch("update", "/:task_id")
       .setPath(TaskPath)
+      .setHeaders(UpdateHeaders)
       .setPayload(TaskUpdate)
       .addSuccess(Task.json)
+      .addError(InvalidRequest)
       .addError(NotFound)
       .addError(InternalError)
       .addError(ValidationFailed)
+      .addError(ServiceUnavailable)
   )
   .add(
     HttpApiEndpoint.del("remove", "/:task_id")

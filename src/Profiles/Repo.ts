@@ -44,7 +44,17 @@ export class ProfilesRepo extends Effect.Service<ProfilesRepo>()("Profiles/Repo"
         return yield* insert(row)
       }).pipe(Effect.withSpan("ProfilesRepo.upsert"))
 
-    return { findByUserId, insert, update, upsert, sql } as const
+    /**
+     * Deletes the person's profile, with their account. Deleting none is fine, so it can run
+     * again for the same person.
+     */
+    const deleteByUserId = (userId: string) =>
+      repo.delete(userId).pipe(
+        trackDb("profiles.delete"),
+        Effect.withSpan("ProfilesRepo.deleteByUserId")
+      )
+
+    return { findByUserId, insert, update, upsert, deleteByUserId, sql } as const
   }),
   dependencies: [SqlLive]
 }) {}
