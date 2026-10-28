@@ -192,7 +192,7 @@ type DecodeIssue = { readonly _tag?: string; readonly path?: ReadonlyArray<unkno
  * Every error answers in the Plat5 envelope (plat5 docs/reference/errors.md):
  *
  * - Effect's own 400 for a body or path that doesn't decode becomes a 422
- *   VALIDATION_ERROR, with a field per issue.
+ *   VALIDATION_ERROR, with a field for each path that has an issue.
  * - The server's bodiless answers, whose text wouldn't be product copy anyway, get the
  *   envelope with a fallback sentence: a 404 for a path no route serves is NOT_FOUND, and
  *   a 400 for a body that isn't JSON is a 422 VALIDATION_ERROR on `body`.
@@ -218,9 +218,13 @@ const plat5Envelope = (
   }
   if (data?._tag === "HttpApiDecodeError") {
     const issues: ReadonlyArray<DecodeIssue> = Array.isArray(data.issues) ? data.issues : []
-    const fields = issues.map((issue) => {
+    // One field per path: a union reports an issue for each of its members, all at its path.
+    const paths = new Set<string>()
+    const fields = issues.flatMap((issue) => {
       const path = (issue.path ?? []).map(String).join(".")
-      return { path, message: issueMessage(issue, path) }
+      if (paths.has(path)) return []
+      paths.add(path)
+      return [{ path, message: issueMessage(issue, path) }]
     })
     return HttpServerResponse.unsafeJson(
       {
