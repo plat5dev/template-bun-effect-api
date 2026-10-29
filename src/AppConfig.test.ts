@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 import { AppConfig } from "./AppConfig.js"
 
 const missing =
-  "TASK_ASSIGNEE_PERMISSION is unset or empty: set it to the permission an assignee needs on the task's project (the starter's is project:read)"
+  "TASK_ASSIGNEE_PERMISSION is unset or isn't a permission name ([a-z0-9:._-], at most 64 characters): set it to the permission an assignee needs on the task's project (the starter's is project:read)"
 
 /** The config, read from `env` alone. */
 const load = (env: Record<string, string>) =>
@@ -16,8 +16,15 @@ const load = (env: Record<string, string>) =>
     )
   )
 
-test("TASK_ASSIGNEE_PERMISSION unset or empty: the config fails", async () => {
-  for (const env of [{}, { TASK_ASSIGNEE_PERMISSION: "" }] as Record<string, string>[]) {
+test("TASK_ASSIGNEE_PERMISSION unset or not a permission name: the config fails", async () => {
+  for (const env of [
+    {},
+    { TASK_ASSIGNEE_PERMISSION: "" },
+    { TASK_ASSIGNEE_PERMISSION: "  " },
+    { TASK_ASSIGNEE_PERMISSION: " tasks:assignable " },
+    { TASK_ASSIGNEE_PERMISSION: "Project:Read" },
+    { TASK_ASSIGNEE_PERMISSION: "a".repeat(65) }
+  ] as Record<string, string>[]) {
     const exit = await load(env)
     expect(Exit.isFailure(exit)).toBe(true)
     expect(String(exit)).toContain(missing)
@@ -31,12 +38,12 @@ test("TASK_ASSIGNEE_PERMISSION names the assignee's permission", async () => {
 
 test("variables are read as set: only unset or empty is unset", async () => {
   const exit = await load({
-    TASK_ASSIGNEE_PERMISSION: " tasks:assignable ",
+    TASK_ASSIGNEE_PERMISSION: "tasks:assignable",
     IDENTITY_INTERNAL_URL: "",
     DATABASE_PATH: ""
   })
   if (!Exit.isSuccess(exit)) throw new Error(String(exit))
-  expect(exit.value.taskAssigneePermission).toBe(" tasks:assignable ")
+  expect(exit.value.taskAssigneePermission).toBe("tasks:assignable")
   expect(exit.value.identityInternalUrl).toBeUndefined()
   expect(exit.value.databasePath).toBe("./data/app.db")
 })

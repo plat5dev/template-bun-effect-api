@@ -6,6 +6,9 @@ const optionalNonEmpty = (name: string) =>
     Effect.map((opt) => (opt._tag === "Some" && opt.value.trim() !== "" ? opt.value.trim() : undefined))
   )
 
+/** A permission's name as Plat5's roles write it. */
+const PERMISSION_NAME = /^[a-z0-9:._-]{1,64}$/
+
 /** A variable as set, untrimmed, or undefined when unset or empty. */
 const optionalSet = (name: string) =>
   Config.option(Config.string(name)).pipe(
@@ -85,11 +88,11 @@ export class AppConfig extends Context.Tag("AppConfig")<
       const identityInternalUrl = yield* optionalSet("IDENTITY_INTERNAL_URL")
       const taskAssigneePermission = yield* optionalSet("TASK_ASSIGNEE_PERMISSION").pipe(
         Effect.filterOrFail(
-          (value): value is string => value !== undefined,
+          (value): value is string => value !== undefined && PERMISSION_NAME.test(value),
           () =>
             ConfigError.MissingData(
               ["TASK_ASSIGNEE_PERMISSION"],
-              "TASK_ASSIGNEE_PERMISSION is unset or empty: set it to the permission an assignee needs on the task's project (the starter's is project:read)"
+              "TASK_ASSIGNEE_PERMISSION is unset or isn't a permission name ([a-z0-9:._-], at most 64 characters): set it to the permission an assignee needs on the task's project (the starter's is project:read)"
             )
         )
       )
