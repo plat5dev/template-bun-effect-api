@@ -35,6 +35,7 @@ type Task = {
   status: string
   assignee_id: string | null
   created_by: string
+  updated_at: string
 }
 
 type ErrorBody = {
@@ -626,12 +627,36 @@ test("a field of the wrong JSON type is a 422 at body, never coerced", async () 
   }
 })
 
-test("keys match their fields ignoring case, as Go's decoder", async () => {
-  const { send } = await newApp()
-  const res = await send("POST", tasksPath, `{"TITLE":"Launch","Status":"done","other":1}`)
-  expect(res.status).toBe(201)
-  const task = (await res.json()) as Task
-  expect([task.title, task.status]).toEqual(["Launch", "done"])
+test("keys match exactly: an unknown field is a 422 naming each, before anything else", async () => {
+  const { send, create, get, list, identity } = await newApp()
+  const task = await create(environment, "Launch")
+  for (
+    const [method, url, body, paths] of [
+      ["POST", tasksPath, `{"Title":"x"}`, ["Title"]],
+      ["POST", tasksPath, `{"title":"x","priority":1}`, ["priority"]],
+      ["POST", tasksPath, `{"Status":"done","title":"","Assignee_ID":"${assignee}"}`, ["Status", "Assignee_ID"]],
+      ["POST", tasksPath, `{"x":1,"title":"x","y":2,"x":3}`, ["x", "y"]],
+      ["POST", tasksPath, `{"b":1,"title":"x","1":2}`, ["b", "1"]],
+      ["PATCH", `${tasksPath}/${task.id}`, `{"Title":"x"}`, ["Title"]],
+      // A missing task: the body first.
+      ["PATCH", `${tasksPath}/01jd8x3k7q00000000000000zz`, `{"title":"x","extra":{"a":1}}`, ["extra"]]
+    ] as const
+  ) {
+    const res = await send(method, url, body)
+    const label = `${method} ${body}`
+    expect(res.status, label).toBe(422)
+    const { error } = (await res.json()) as ErrorBody
+    expect(error.code, label).toBe("VALIDATION_ERROR")
+    expect(error.message, label).toBe(`${paths[0]} isn't a field.`)
+    expect(error.details.fields, label).toEqual(paths.map((path) => ({ path, message: `${path} isn't a field.` })))
+  }
+  expect((await list()).tasks.length).toBe(1)
+  const got = await get(task.id)
+  expect(got.title).toBe("Launch")
+  expect(got.updated_at, "a refused PATCH wrote").toBe(task.updated_at)
+  expect(identity.asked).toEqual([])
+  const res = await send("PATCH", `${tasksPath}/${task.id}`, `{"title":"Ship","status":"done","assignee_id":null}`)
+  expect(res.status).toBe(200)
 })
 
 test("a body over 1 MiB is a 413 before anything else, on any route", async () => {
@@ -658,7 +683,7 @@ test("a body over 1 MiB is a 413 before anything else, on any route", async () =
     })
   }
   // Exactly 1 MiB is read.
-  const fits = `{"title":"a","pad":"${"x".repeat((1 << 20) - 22)}"}`
+  const fits = `{"title":"a"${" ".repeat((1 << 20) - 13)}}`
   expect(Buffer.byteLength(fits)).toBe(1 << 20)
   expect((await send("POST", tasksPath, fits)).status).toBe(201)
 })

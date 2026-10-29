@@ -10,7 +10,7 @@ Plat5 decides who may call what, at its gateway. This service owns business logi
 |-------|--------|
 | Runtime / installs | Bun |
 | HTTP | `effect` + `@effect/platform` `HttpApi` + `@effect/platform-bun` (OpenAPI at `/docs`) |
-| Schema | `effect/Schema`, `@effect/sql` `Model`, describing the API for its OpenAPI; write bodies are checked by hand (`src/plat5/Body.ts`), so every answer is the API's own |
+| Schema | `effect/Schema`, `@effect/sql` `Model`, describing the API for its OpenAPI; write bodies are checked by hand (`src/plat5/Body.ts`), keys matched exactly, so every answer is the API's own |
 | DB | SQLite via `@effect/sql-sqlite-bun`, with its migrator |
 | Dev | `bun --watch` |
 | Tests | `bun test`, the API on a Bun server of its own, identity faked by a local HTTP server |
@@ -38,6 +38,8 @@ Projects and their environments are Plat5 nodes, kinds in `plat5.yml` (organizat
 A task is authored: `created_by` is the member id of whoever created it, and stays theirs if they leave the tree ([where a field goes](https://github.com/plat5dev/plat5/blob/master/docs/concepts/model.md#where-a-field-goes)). Its `assignee_id` is a member of the same tree who can see the project, checked with identity when it's set ([Checking an assignee](#checking-an-assignee)). A profile is the person's, the same in every tree, so it sits on a user route. The person's name is identity's (`GET /user`), not the profile's.
 
 Ids are lowercase ULIDs with no prefix, like every Plat5 id.
+
+Request bodies match keys exactly; an unknown field is a **422** naming it. `{"Title": …}` isn't `title`: each unknown field is in `details.fields` once, in the body's order, as `{"path": "Title", "message": "Title isn't a field."}`, and the first one's sentence is the `message`. A nested field's path is `address.street`, an array item's `tags[0].name`. A body with an unknown field is refused before its values are checked.
 
 ## The config
 

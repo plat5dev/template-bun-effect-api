@@ -78,6 +78,29 @@ test("a profile body not sent as JSON, or of the wrong type, is a 422 at body", 
   expect(((await res.json()) as { bio: string }).bio).toBe("")
 })
 
+test("PUT: keys match exactly: an unknown field is a 422 naming each", async () => {
+  const send = await newApp()
+  for (
+    const [body, paths] of [
+      [`{"Bio":"hi"}`, ["Bio"]],
+      [`{"bio":"hi","name":"x"}`, ["name"]],
+      // Before any value: the type and the length are checked once the keys are right.
+      [`{"BIO":5,"bio":${JSON.stringify("x".repeat(2001))}}`, ["BIO"]]
+    ] as const
+  ) {
+    const res = await send("PUT", body)
+    expect(res.status, body).toBe(422)
+    const { error } = (await res.json()) as { error: { code: string; message: string; details: { fields: unknown } } }
+    expect(error.code, body).toBe("VALIDATION_ERROR")
+    expect(error.message, body).toBe(`${paths[0]} isn't a field.`)
+    expect(error.details.fields, body).toEqual(paths.map((path) => ({ path, message: `${path} isn't a field.` })))
+  }
+  // Nothing was written: the profile is still new.
+  const res = await send("GET")
+  expect(((await res.json()) as { bio: string }).bio).toBe("")
+  expect((await send("PUT", `{"bio":"hi"}`)).status).toBe(200)
+})
+
 test("PUT is 200 whether the profile is new or not, with the change audited", async () => {
   const send = await newApp()
   let res = await send("PUT", `{"bio":""}`)

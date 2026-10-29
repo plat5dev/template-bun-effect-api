@@ -13,7 +13,7 @@ import { TasksRepo } from "./Repo.js"
 // Monotonic, so tasks made in the same millisecond still list in the order they were made.
 const ulid = monotonicFactory()
 
-/** The body fields a task write reads. */
+/** The body fields a task write reads: a key that isn't one of these, exactly, is a 422. */
 export const TASK_FIELDS = ["title", "status", "assignee_id"] as const
 
 const MAX_TITLE = 255
