@@ -11,7 +11,7 @@ const recordDbTotal = (operationName: string) =>
   }).pipe(
     Metric.tagged("db_system_name", "sqlite"),
     Metric.tagged("db_operation_name", operationName),
-    Metric.tagged("db_namespace", "app"),
+    Metric.tagged("db_namespace", "api"),
     Metric.update(1)
   )
 
@@ -22,7 +22,7 @@ const recordDbError = (operationName: string) =>
   }).pipe(
     Metric.tagged("db_system_name", "sqlite"),
     Metric.tagged("db_operation_name", operationName),
-    Metric.tagged("db_namespace", "app"),
+    Metric.tagged("db_namespace", "api"),
     Metric.update(1)
   )
 
@@ -34,7 +34,7 @@ const recordDbDuration = (operationName: string, seconds: number) =>
   ).pipe(
     Metric.tagged("db_system_name", "sqlite"),
     Metric.tagged("db_operation_name", operationName),
-    Metric.tagged("db_namespace", "app"),
+    Metric.tagged("db_namespace", "api"),
     Metric.update(seconds)
   )
 

@@ -16,7 +16,7 @@ const ApiLive = HttpApiBuilder.api(Api).pipe(
 )
 
 /** The public API, on whatever HTTP server it's given. */
-export const PublicApiLive = HttpApiBuilder.serve(httpObservability).pipe(
+export const PublicApiLive = HttpApiBuilder.serve(httpObservability(Api)).pipe(
   Layer.provide(HttpApiSwagger.layer({ path: "/docs" })),
   Layer.provide(HttpApiBuilder.middlewareOpenApi()),
   // No CORS: the gateway owns it (plat5 docs/guides/write-a-service.md)

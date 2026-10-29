@@ -15,19 +15,19 @@ export class ProfilesRepo extends Effect.Service<ProfilesRepo>()("Profiles/Repo"
 
     const findByUserId = (userId: string) =>
       repo.findById(userId).pipe(
-        trackDb("find"),
+        trackDb("profiles.find"),
         Effect.withSpan("ProfilesRepo.findByUserId")
       )
 
     const insert = (row: typeof Profile.insert.Type) =>
       repo.insert(row).pipe(
-        trackDb("insert"),
+        trackDb("profiles.insert"),
         Effect.withSpan("ProfilesRepo.insert")
       )
 
     const update = (row: typeof Profile.update.Type) =>
       repo.update(row).pipe(
-        trackDb("update"),
+        trackDb("profiles.update"),
         Effect.withSpan("ProfilesRepo.update")
       )
 

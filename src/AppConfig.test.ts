@@ -17,7 +17,7 @@ const load = (env: Record<string, string>) =>
   )
 
 test("TASK_ASSIGNEE_PERMISSION unset or empty: the config fails", async () => {
-  for (const env of [{}, { TASK_ASSIGNEE_PERMISSION: "" }, { TASK_ASSIGNEE_PERMISSION: "  " }] as Record<string, string>[]) {
+  for (const env of [{}, { TASK_ASSIGNEE_PERMISSION: "" }] as Record<string, string>[]) {
     const exit = await load(env)
     expect(Exit.isFailure(exit)).toBe(true)
     expect(String(exit)).toContain(missing)
@@ -27,6 +27,18 @@ test("TASK_ASSIGNEE_PERMISSION unset or empty: the config fails", async () => {
 test("TASK_ASSIGNEE_PERMISSION names the assignee's permission", async () => {
   const exit = await load({ TASK_ASSIGNEE_PERMISSION: "tasks:assignable" })
   expect(Exit.isSuccess(exit) && exit.value.taskAssigneePermission).toBe("tasks:assignable")
+})
+
+test("variables are read as set: only unset or empty is unset", async () => {
+  const exit = await load({
+    TASK_ASSIGNEE_PERMISSION: " tasks:assignable ",
+    IDENTITY_INTERNAL_URL: "",
+    DATABASE_PATH: ""
+  })
+  if (!Exit.isSuccess(exit)) throw new Error(String(exit))
+  expect(exit.value.taskAssigneePermission).toBe(" tasks:assignable ")
+  expect(exit.value.identityInternalUrl).toBeUndefined()
+  expect(exit.value.databasePath).toBe("./data/app.db")
 })
 
 test("without TASK_ASSIGNEE_PERMISSION the API won't start", () => {

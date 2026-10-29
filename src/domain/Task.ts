@@ -13,7 +13,9 @@ export type TaskStatus = typeof TaskStatus.Type
 export class Task extends Model.Class<Task>("Task")({
   id: Model.GeneratedByApp(TaskId),
   environment_id: Model.GeneratedByApp(Schema.String),
-  title: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
+  // Checked by the service (trimmed, 1 to 255 characters), not here: a schema's maxLength
+  // counts UTF-16 units, not characters.
+  title: Schema.String,
   status: TaskStatus,
   assignee_id: Schema.NullOr(Schema.String),
   created_by: Model.GeneratedByApp(Schema.String),

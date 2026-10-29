@@ -10,7 +10,7 @@ Plat5 decides who may call what, at its gateway. This service owns business logi
 |-------|--------|
 | Runtime / installs | Bun |
 | HTTP | `effect` + `@effect/platform` `HttpApi` + `@effect/platform-bun` (OpenAPI at `/docs`) |
-| Schema | `effect/Schema`, `@effect/sql` `Model` |
+| Schema | `effect/Schema`, `@effect/sql` `Model`, describing the API for its OpenAPI; write bodies are checked by hand (`src/plat5/Body.ts`), so every answer is the API's own |
 | DB | SQLite via `@effect/sql-sqlite-bun`, with its migrator |
 | Dev | `bun --watch` |
 | Tests | `bun test`, the API on a Bun server of its own, identity faked by a local HTTP server |
@@ -265,7 +265,7 @@ src/
   Lifecycle.ts         # identity's tree and user feeds: purged environments, deleted accounts
   Access.ts            # identity's access evaluation: assignees
   Telemetry.ts         # OTel resource, scrape + optional OTLP, MetricsScrape
-  plat5/               # errors, audit details, pagination, HTTP/DB observability
+  plat5/               # errors, request bodies, timestamps, audit details, pagination, HTTP/DB observability
   domain/              # Profile, Task models
   Profiles/ Tasks/     # the API: Api + Http + Repo + Service
   *.test.ts            # tests, beside what they test

@@ -16,14 +16,27 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
 
     const insert = (row: typeof Task.insert.Type) =>
       repo.insert(row).pipe(
-        trackDb("insert"),
+        trackDb("tasks.insert"),
         Effect.withSpan("TasksRepo.insert")
       )
 
-    const update = (row: typeof Task.update.Type) =>
-      repo.update(row).pipe(
-        trackDb("update"),
-        Effect.withSpan("TasksRepo.update")
+    /**
+     * Writes the task's fields, scoped by its environment. Undefined when no row changed:
+     * the task was deleted, or isn't in the environment.
+     */
+    const updateInEnvironment = (task: Task) =>
+      sql`
+        UPDATE tasks
+        SET title = ${task.title}, status = ${task.status}, assignee_id = ${task.assignee_id},
+          updated_at = ${task.updated_at}
+        WHERE id = ${task.id} AND environment_id = ${task.environment_id}
+        RETURNING *
+      `.pipe(
+        Effect.flatMap(Schema.decodeUnknown(Schema.Array(Task))),
+        Effect.map((rows) => rows[0]),
+        Effect.orDie,
+        trackDb("tasks.update"),
+        Effect.withSpan("TasksRepo.updateInEnvironment")
       )
 
     /** The task, when it is in the environment. */
@@ -32,14 +45,17 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
         Effect.flatMap(Schema.decodeUnknown(Schema.Array(Task))),
         Effect.map((rows) => rows[0]),
         Effect.orDie,
-        trackDb("find"),
+        trackDb("tasks.find"),
         Effect.withSpan("TasksRepo.findInEnvironment")
       )
 
-    const deleteById = (id: TaskId) =>
-      repo.delete(id).pipe(
-        trackDb("delete"),
-        Effect.withSpan("TasksRepo.delete")
+    /** Deletes the task, scoped by its environment. False when no row was deleted. */
+    const deleteInEnvironment = (environmentId: string, id: TaskId) =>
+      sql`DELETE FROM tasks WHERE id = ${id} AND environment_id = ${environmentId} RETURNING id`.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.orDie,
+        trackDb("tasks.delete"),
+        Effect.withSpan("TasksRepo.deleteInEnvironment")
       )
 
     /**
@@ -50,7 +66,7 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
       sql`DELETE FROM tasks WHERE environment_id = ${environmentId}`.pipe(
         Effect.asVoid,
         Effect.orDie,
-        trackDb("delete_by_environment"),
+        trackDb("tasks.delete_by_environment"),
         Effect.withSpan("TasksRepo.deleteByEnvironment")
       )
 
@@ -65,11 +81,18 @@ export class TasksRepo extends Effect.Service<TasksRepo>()("Tasks/Repo", {
         Effect.flatMap(Schema.decodeUnknown(Schema.Array(Task))),
         Effect.map((rows) => trim(rows, page)),
         Effect.orDie,
-        trackDb("list"),
+        trackDb("tasks.list"),
         Effect.withSpan("TasksRepo.listByEnvironment")
       )
 
-    return { insert, update, findInEnvironment, deleteById, deleteByEnvironment, listByEnvironment } as const
+    return {
+      insert,
+      updateInEnvironment,
+      findInEnvironment,
+      deleteInEnvironment,
+      deleteByEnvironment,
+      listByEnvironment
+    } as const
   }),
   dependencies: [SqlLive]
 }) {}

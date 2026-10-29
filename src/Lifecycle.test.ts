@@ -4,7 +4,7 @@ import { expect, onTestFinished, spyOn, test } from "bun:test"
 import { ConfigProvider, Effect, Exit, Layer, Option, Scope } from "effect"
 import { Profile } from "./domain/Profile.js"
 import { Task, TaskId } from "./domain/Task.js"
-import { consumer } from "./Lifecycle.js"
+import { consumer, decodePage } from "./Lifecycle.js"
 import { ProfilesRepo } from "./Profiles/Repo.js"
 import { SqlLive } from "./Sql.js"
 import { TasksRepo } from "./Tasks/Repo.js"
@@ -18,7 +18,7 @@ const fresh = "01jd8x3k7q00000000000000u3"
 type Event = { id: string; type: string; [field: string]: string }
 
 /** One feed as identity serves it: its events, two to a page, and each cursor asked for. */
-type Served = { key: string; events: Event[]; asked: string[]; fail: boolean }
+type Served = { key: string; events: Event[]; asked: string[]; fail: boolean | number }
 
 /** Identity, serving the tree and user feeds at their paths. */
 const serveIdentity = (tree: Event[], user: Event[]) => {
@@ -34,7 +34,9 @@ const serveIdentity = (tree: Event[], user: Event[]) => {
       const url = new URL(req.url)
       const feed = feeds[url.pathname]
       if (!feed) return new Response(null, { status: 404 })
-      if (feed.fail) return new Response(null, { status: 503 })
+      if (feed.fail === true) return new Response(null, { status: 503 })
+      // Another success than 200, with a page that would otherwise do.
+      if (feed.fail) return Response.json({ [feed.key]: feed.events, has_more: false }, { status: feed.fail })
       const after = url.searchParams.get("starting_after") ?? ""
       feed.asked.push(after)
       limits.push(url.searchParams.get("limit") ?? "")
@@ -176,13 +178,13 @@ test("user feed: user.deleted deletes that profile, from the user cursor", async
   expect(s.identity.user.asked.at(-1)).toBe("3")
 })
 
-for (const failing of ["tree", "user"] as const) {
-  test(`the ${failing} feed failing doesn't stop the other`, async () => {
+for (const [failing, fail] of [["tree", true], ["user", true], ["tree", 201], ["user", 203]] as const) {
+  test(`the ${failing} feed failing (${fail}) doesn't stop the other`, async () => {
     const s = await setup(
       [{ id: "5", type: "node.purged", kind: "environment", node_id: purged }],
       [{ id: "6", type: "user.deleted", user_id: gone }]
     )
-    s.identity[failing].fail = true
+    s.identity[failing].fail = fail
     await s.addTask("01jd8x3k7q0000000000000t01", purged)
     await s.addProfile(gone)
 
@@ -215,4 +217,34 @@ test("reading an event twice is harmless", async () => {
   expect(s.identity.tree.asked).toEqual(["", ""])
   expect(s.identity.user.asked).toEqual(["", ""])
   expect(s.logged().some((line) => line.level === "error")).toBe(false)
+})
+
+test("a feed's page is checked as Go reads it", () => {
+  // Its events under the feed's key and has_more, each either null; keys ignoring case.
+  expect(decodePage("tree", "tree_events", { tree_events: null, has_more: null })).toEqual({
+    events: [],
+    has_more: false
+  })
+  const page = decodePage("tree", "tree_events", {
+    tree_events: [{ ID: "7", Type: "node.purged", kind: "environment", node_id: null, extra: 1 }, null],
+    has_more: true
+  })
+  expect(page.events).toEqual([
+    { id: "7", type: "node.purged", kind: "environment", node_id: "", user_id: "" },
+    { id: "", type: "", kind: "", node_id: "", user_id: "" }
+  ])
+  expect(page.has_more).toBe(true)
+  // Missing, or of another type, is an error.
+  for (const bad of [
+    null,
+    [],
+    { has_more: false },
+    { tree_events: [] },
+    { tree_events: {}, has_more: false },
+    { tree_events: [], has_more: "true" },
+    { tree_events: [5], has_more: false },
+    { tree_events: [{ id: 7 }], has_more: false }
+  ]) {
+    expect(() => decodePage("tree", "tree_events", bad)).toThrow()
+  }
 })

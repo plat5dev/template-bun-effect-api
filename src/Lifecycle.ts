@@ -10,9 +10,9 @@
  * event id acted on, kept in SQLite and advanced after acting on each page; acting again on
  * the same event changes nothing.
  */
-import { FetchHttpClient, HttpClient, HttpClientResponse } from "@effect/platform"
+import { FetchHttpClient, HttpClient } from "@effect/platform"
 import { SqlClient } from "@effect/sql"
-import { Cause, Duration, Effect, Layer, Schedule, Schema } from "effect"
+import { Cause, Duration, Effect, Layer, Schedule } from "effect"
 import { AppConfig } from "./AppConfig.js"
 import { trackDb } from "./plat5/DbMetrics.js"
 import { ProfilesRepo } from "./Profiles/Repo.js"
@@ -23,29 +23,57 @@ import { TasksRepo } from "./Tasks/Repo.js"
 export const INTERVAL = Duration.seconds(5)
 const PAGE_SIZE = 100
 
-/** The part of a tree event the API reads. `kind` and `node_id` are a node event's. */
-const TreeEvent = Schema.Struct({
-  id: Schema.String,
-  type: Schema.String,
-  kind: Schema.optional(Schema.String),
-  node_id: Schema.optional(Schema.String)
-})
-type TreeEvent = typeof TreeEvent.Type
+/**
+ * The part of an event the API reads: each field a string, "" when absent or null. A tree
+ * event's `kind` and `node_id` are a node event's; a user event's `user_id` is its person.
+ */
+type Event = {
+  readonly id: string
+  readonly type: string
+  readonly kind: string
+  readonly node_id: string
+  readonly user_id: string
+}
 
-/** The part of a user event the API reads. */
-const UserEvent = Schema.Struct({
-  id: Schema.String,
-  type: Schema.String,
-  user_id: Schema.String
-})
-type UserEvent = typeof UserEvent.Type
+const EVENT_FIELDS = ["id", "type", "kind", "node_id", "user_id"] as const
 
-/** A feed's page: its events, under the feed's own key, and whether there are more. */
-const Page = <A, I, K extends string>(key: K, event: Schema.Schema<A, I>) =>
-  Schema.Struct({
-    events: Schema.propertySignature(Schema.Array(event)).pipe(Schema.fromKey(key)),
-    has_more: Schema.Boolean
-  })
+/** An event as read: keys matched ignoring case, a null event all "". Another type is an error. */
+const decodeEvent = (raw: unknown): Event => {
+  const event: Record<string, string> = { id: "", type: "", kind: "", node_id: "", user_id: "" }
+  if (raw === null) return event as Event
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("event is not an object")
+  for (const [key, value] of Object.entries(raw)) {
+    const name = EVENT_FIELDS.find((n) => n === key || n === key.toLowerCase())
+    if (name === undefined || value === null) continue
+    if (typeof value !== "string") throw new Error(`event ${name} is not a string`)
+    event[name] = value
+  }
+  return event as Event
+}
+
+/**
+ * A feed's page: its events under the feed's own `key`, a list or null, and `has_more`, a
+ * boolean or null. Either missing, or of another type, is an error.
+ */
+export const decodePage = (
+  feed: string,
+  key: string,
+  page: unknown
+): { readonly events: ReadonlyArray<Event>; readonly has_more: boolean } => {
+  if (typeof page !== "object" || page === null || Array.isArray(page)) {
+    throw new Error(`${feed} feed: not an object`)
+  }
+  const p = page as Record<string, unknown>
+  const events = p[key]
+  if (!(key in p)) throw new Error(`${feed} feed: ${key}: missing`)
+  if (events !== null && !Array.isArray(events)) throw new Error(`${feed} feed: ${key}: not a list`)
+  if (!("has_more" in p)) throw new Error(`${feed} feed: has_more: missing`)
+  const more = p.has_more
+  if (more !== null && typeof more !== "boolean") {
+    throw new Error(`${feed} feed: has_more: not a boolean`)
+  }
+  return { events: (events ?? []).map(decodeEvent), has_more: more === true }
+}
 
 /** A feed's name: its row in feed_cursors, and its logs' `feed`. */
 type FeedName = "tree" | "user"
@@ -71,7 +99,7 @@ export const consumer = (identityUrl: string) =>
     const profiles = yield* ProfilesRepo
     // A poll every few seconds isn't a request worth a trace.
     const client = (yield* HttpClient.HttpClient).pipe(
-      HttpClient.filterStatusOk,
+      HttpClient.filterStatus((status) => status === 200),
       HttpClient.withTracerDisabledWhen(() => true)
     )
 
@@ -95,11 +123,11 @@ export const consumer = (identityUrl: string) =>
      * page and then advancing the cursor past it. A failure is logged with the feed's name,
      * and the feed is read again on the next poll.
      */
-    const follow = <E extends { readonly id: string }, I>(
+    const follow = (
       name: FeedName,
       path: string,
-      page: Schema.Schema<{ readonly events: ReadonlyArray<E>; readonly has_more: boolean }, I>,
-      act: (event: E) => Effect.Effect<void>
+      key: string,
+      act: (event: Event) => Effect.Effect<void>
     ) => {
       const fetchPage = (after: string) =>
         client.get(`${identityUrl}${path}`, {
@@ -107,7 +135,8 @@ export const consumer = (identityUrl: string) =>
             ? { limit: PAGE_SIZE }
             : { limit: PAGE_SIZE, starting_after: after }
         }).pipe(
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(page)),
+          Effect.flatMap((res) => res.json),
+          Effect.flatMap((page) => Effect.try(() => decodePage(name, key, page))),
           Effect.scoped,
           Effect.timeout(Duration.seconds(10))
         )
@@ -135,8 +164,8 @@ export const consumer = (identityUrl: string) =>
       )
     }
 
-    const actOnTree = (event: TreeEvent) =>
-      event.type !== "node.purged" || event.kind !== "environment" || event.node_id === undefined
+    const actOnTree = (event: Event) =>
+      event.type !== "node.purged" || event.kind !== "environment"
         ? Effect.void
         : tasks.deleteByEnvironment(event.node_id).pipe(
           Effect.zipRight(
@@ -147,7 +176,7 @@ export const consumer = (identityUrl: string) =>
           )
         )
 
-    const actOnUser = (event: UserEvent) =>
+    const actOnUser = (event: Event) =>
       event.type !== "user.deleted"
         ? Effect.void
         : profiles.deleteByUserId(event.user_id).pipe(
@@ -164,8 +193,8 @@ export const consumer = (identityUrl: string) =>
      * other.
      */
     const poll = Effect.zipRight(
-      follow("tree", "/internal/tree-events", Page("tree_events", TreeEvent), actOnTree),
-      follow("user", "/internal/user-events", Page("user_events", UserEvent), actOnUser)
+      follow("tree", "/internal/tree-events", "tree_events", actOnTree),
+      follow("user", "/internal/user-events", "user_events", actOnUser)
     )
 
     return { poll } as const
@@ -189,7 +218,7 @@ export const LifecycleLive = Layer.unwrapEffect(
     return Layer.scopedDiscard(
       consumer(config.identityInternalUrl).pipe(
         Effect.flatMap(({ poll }) =>
-          poll.pipe(Effect.repeat(Schedule.spaced(INTERVAL)), Effect.forkScoped)
+          poll.pipe(Effect.repeat(Schedule.fixed(INTERVAL)), Effect.forkScoped)
         )
       )
     ).pipe(

@@ -13,7 +13,7 @@
  * a service can call these where it has the old and new values in hand.
  */
 import { HttpApp, HttpServerResponse } from "@effect/platform"
-import { Effect } from "effect"
+import { Clock, Effect } from "effect"
 
 export const DETAILS_HEADER = "X-Plat5-Audit-Details"
 export const CREATED_HEADER = "X-Plat5-Audit-Created"
@@ -34,12 +34,15 @@ export const changed = (
 }
 
 /**
- * `details` as one JSON object of visible ASCII, or null over the cap. Non-ASCII is
- * escaped as \u, which is still the same JSON.
+ * `details` as one JSON object of visible ASCII, or null over the cap. Keys are sorted;
+ * `<`, `>`, `&` and all non-ASCII are escaped as \u (astral characters as surrogate pairs),
+ * which is still the same JSON.
  */
 export const encode = (details: Details): string | null => {
-  const json = JSON.stringify(details).replace(
-    /[^\x20-\x7e]/g,
+  const sorted: Details = {}
+  for (const key of Object.keys(details).sort()) sorted[key] = details[key]
+  const json = JSON.stringify(sorted).replace(
+    /[^\x20-\x7e]|[<>&]/g,
     (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`
   )
   return json.length > MAX_BYTES ? null : json
@@ -59,7 +62,14 @@ export const setDetails = (details: Details): Effect.Effect<void> => {
   if (Object.keys(details).length === 0) return Effect.void
   const value = encode(details)
   if (value === null) {
-    return Effect.annotateCurrentSpan("audit.details_not_sent", `over ${MAX_BYTES} bytes`)
+    return Effect.all([Effect.currentSpan, Clock.currentTimeNanos]).pipe(
+      Effect.tap(([span, at]) =>
+        span.event("audit details not sent", at, {
+          reason: `audit details are over ${MAX_BYTES} bytes`
+        })
+      ),
+      Effect.ignore
+    )
   }
   return setHeader(DETAILS_HEADER, value)
 }

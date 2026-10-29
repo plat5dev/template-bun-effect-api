@@ -6,6 +6,12 @@ const optionalNonEmpty = (name: string) =>
     Effect.map((opt) => (opt._tag === "Some" && opt.value.trim() !== "" ? opt.value.trim() : undefined))
   )
 
+/** A variable as set, untrimmed, or undefined when unset or empty. */
+const optionalSet = (name: string) =>
+  Config.option(Config.string(name)).pipe(
+    Effect.map((opt) => (opt._tag === "Some" && opt.value !== "" ? opt.value : undefined))
+  )
+
 /** Comma-separated exporter list → lowercased tokens (empty if unset). */
 const optionalExporterList = (name: string) =>
   optionalNonEmpty(name).pipe(
@@ -75,11 +81,9 @@ export class AppConfig extends Context.Tag("AppConfig")<
     Effect.gen(function*() {
       const port = yield* Config.integer("PORT").pipe(Config.withDefault(3000))
       const internalPort = yield* Config.integer("INTERNAL_PORT").pipe(Config.withDefault(3001))
-      const databasePath = yield* Config.string("DATABASE_PATH").pipe(
-        Config.withDefault("./data/app.db")
-      )
-      const identityInternalUrl = yield* optionalNonEmpty("IDENTITY_INTERNAL_URL")
-      const taskAssigneePermission = yield* optionalNonEmpty("TASK_ASSIGNEE_PERMISSION").pipe(
+      const databasePath = (yield* optionalSet("DATABASE_PATH")) ?? "./data/app.db"
+      const identityInternalUrl = yield* optionalSet("IDENTITY_INTERNAL_URL")
+      const taskAssigneePermission = yield* optionalSet("TASK_ASSIGNEE_PERMISSION").pipe(
         Effect.filterOrFail(
           (value): value is string => value !== undefined,
           () =>

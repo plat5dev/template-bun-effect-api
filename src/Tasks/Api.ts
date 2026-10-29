@@ -22,6 +22,10 @@ export const MEMBER_HEADER = "x-plat5-member-id"
  */
 export const PROJECT_HEADER = "x-plat5-project-id"
 
+// The bodies, for the OpenAPI document. The handlers read them (src/plat5/Body.ts) and the
+// service checks them, so their answers are the API's own: a body not sent as JSON, or a
+// field of the wrong type, is a 422 at `body`.
+
 /** Plat5 ids, and this API's, are ULIDs in lowercase. */
 const MemberId = Schema.String.pipe(Schema.pattern(/^[0-7][0-9a-hjkmnp-tv-z]{25}$/))
 
@@ -29,16 +33,20 @@ const AssigneeId = Schema.NullOr(MemberId).annotations({
   description: "A member id in the environment's tree who can see its project, or null for none."
 })
 
+const Title = Schema.String.annotations({
+  description: "Trimmed of white space, then 1 to 255 characters."
+})
+
 const TaskCreate = Schema.Struct({
-  title: Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255)),
+  title: Title,
   status: Schema.optional(TaskStatus),
   assignee_id: Schema.optional(AssigneeId)
 })
 
-// assignee_id absent leaves the task's as it is.
+// A field absent or null leaves the task's as it is, but for assignee_id: null unassigns.
 const TaskUpdate = Schema.Struct({
-  title: Schema.optional(Schema.NonEmptyTrimmedString.pipe(Schema.maxLength(255))),
-  status: Schema.optional(TaskStatus),
+  title: Schema.optional(Schema.NullOr(Title)),
+  status: Schema.optional(Schema.NullOr(TaskStatus)),
   assignee_id: Schema.optional(AssigneeId)
 })
 

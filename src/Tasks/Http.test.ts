@@ -116,7 +116,7 @@ const newApp = async (opts: { identityUnset?: boolean; tracesExported?: boolean 
    * environment's project id, but for the header in `without`.
    */
   const send = (
-    method: "GET" | "POST" | "PATCH" | "DELETE",
+    method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT" | "OPTIONS" | "HEAD",
     path: string,
     body?: string,
     opts: { without?: string; headers?: Record<string, string> } = {}
@@ -158,7 +158,7 @@ const newApp = async (opts: { identityUnset?: boolean; tracesExported?: boolean 
       }
     })
 
-  return { identity, send, create, get, list, logged }
+  return { identity, send, create, get, list, logged, base }
 }
 
 const errorOf = async (res: Response) => ((await res.json()) as ErrorBody).error
@@ -428,4 +428,314 @@ test("the OpenAPI document has the assignee and the answers", () => {
   }
   expect(Object.keys(tasks.post!.responses)).toEqual(["201", "400", "422", "500", "503"])
   expect(Object.keys(one.patch!.responses)).toEqual(["200", "400", "404", "422", "500", "503"])
+})
+
+// Parity with the Go starter: each test below pins one behavior the starters share.
+
+const FALLBACK = "That doesn't look right."
+
+/** The 422 for one field. */
+const expectField = async (res: Response, path: string, message: string) => {
+  expect(res.status).toBe(422)
+  const error = await errorOf(res)
+  expect(error.code).toBe("VALIDATION_ERROR")
+  expect(error.message).toBe(message)
+  expect(error.details.fields).toEqual([{ path, message }])
+}
+
+/** The headers to send `contentType`, or to send none. */
+const sending = (contentType: string | undefined) =>
+  contentType === undefined ? { without: "content-type" } : { headers: { "content-type": contentType } }
+
+test("title and status errors, word for word", async () => {
+  const { send, create } = await newApp()
+  const task = await create(environment, "Launch")
+  for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
+    for (const title of ["", "   ", "\u3000\u0085"]) {
+      await expectField(await send(method, path, JSON.stringify({ title })), "title", "Title is required.")
+    }
+    await expectField(await send(method, path, JSON.stringify({ title: "x".repeat(256) })), "title", "Title is too long.")
+    for (const status of ["TODO", "in progress", " done", ""]) {
+      const res = await send(method, path, JSON.stringify({ title: "Launch", status }))
+      await expectField(res, "status", "Status must be todo, in progress, or done.")
+    }
+  }
+  // A create without a title.
+  for (const body of [`{}`, `{"title":null}`, `null`]) {
+    await expectField(await send("POST", tasksPath, body), "title", "Title is required.")
+  }
+})
+
+test("titles are trimmed of Unicode white space, as Go's strings.TrimSpace", async () => {
+  const { send, create } = await newApp()
+  let res = await send("POST", tasksPath, JSON.stringify({ title: " \t\u00a0Launch\u0085\u3000 " }))
+  expect(res.status).toBe(201)
+  expect(((await res.json()) as Task).title).toBe("Launch")
+  // U+FEFF isn't white space to Go. (Not at the start: bun:sqlite drops a leading one.)
+  res = await send("POST", tasksPath, JSON.stringify({ title: "Launch\ufeff" }))
+  expect(((await res.json()) as Task).title).toBe("Launch\ufeff")
+  const task = await create(environment, "Launch")
+  res = await send("PATCH", `${tasksPath}/${task.id}`, JSON.stringify({ title: "  Renamed  " }))
+  expect(res.status).toBe(200)
+  expect(((await res.json()) as Task).title).toBe("Renamed")
+})
+
+test("a title's limit counts characters, not UTF-16 units", async () => {
+  const { send, get } = await newApp()
+  for (const [title, ok] of [
+    ["é".repeat(255), true],
+    ["😀".repeat(255), true],
+    ["é".repeat(256), false],
+    ["😀".repeat(256), false]
+  ] as const) {
+    const res = await send("POST", tasksPath, JSON.stringify({ title }))
+    if (!ok) {
+      await expectField(res, "title", "Title is too long.")
+      continue
+    }
+    expect(res.status).toBe(201)
+    // And it reads back.
+    expect((await get(((await res.json()) as Task).id)).title).toBe(title)
+  }
+})
+
+test("PATCH: null leaves a field as it is, and a no-op still answers the task", async () => {
+  const { send, create } = await newApp()
+  const task = await create(environment, "Launch")
+  for (const body of [`{"title":null,"status":null}`, `{}`, `null`]) {
+    const res = await send("PATCH", `${tasksPath}/${task.id}`, body)
+    expect(res.status).toBe(200)
+    const updated = (await res.json()) as Task
+    expect([updated.title, updated.status]).toEqual(["Launch", "todo"])
+    expect(res.headers.get(DETAILS_HEADER)).toBeNull()
+  }
+})
+
+test("DELETE never reads its body", async () => {
+  const { send, create } = await newApp()
+  for (const [contentType, body] of [
+    ["application/json", ""],
+    ["application/json", "{"],
+    ["text/plain", "hello"],
+    ["not a type", "{}"],
+    [undefined, "x"]
+  ] as const) {
+    const task = await create(environment, "Launch")
+    const res = await send("DELETE", `${tasksPath}/${task.id}`, body, sending(contentType))
+    expect(res.status).toBe(204)
+  }
+})
+
+test("a known path in another method, or OPTIONS, is the unknown route's 404", async () => {
+  const { send, create } = await newApp()
+  const task = await create(environment, "Launch")
+  const taskPath = `${tasksPath}/${task.id}`
+  for (const [method, path] of [
+    ["PUT", taskPath],
+    ["POST", taskPath],
+    ["DELETE", tasksPath],
+    ["PATCH", tasksPath],
+    ["PATCH", `/users/${user}/profile`],
+    ["OPTIONS", tasksPath],
+    ["OPTIONS", taskPath],
+    ["GET", "/nope"],
+    ["GET", `/users/${user}`]
+  ] as const) {
+    const body = method === "OPTIONS" || method === "GET" ? undefined : "{}"
+    const res = await send(method, path, body, { headers: { "x-request-id": "req-9" } })
+    expect(res.status).toBe(404)
+    expect(res.headers.get("allow")).toBeNull()
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8")
+    expect(await res.json()).toEqual({
+      error: {
+        type: "invalid_request_error",
+        code: "NOT_FOUND",
+        message: "Resource not found.",
+        request_id: "req-9",
+        details: { resource: "resource", id: null }
+      }
+    })
+  }
+  // HEAD on a GET route is the GET's answer, without a body; a trailing slash is the same route.
+  let res = await send("HEAD", tasksPath)
+  expect(res.status).toBe(200)
+  expect(await res.text()).toBe("")
+  res = await send("GET", `${tasksPath}/`)
+  expect(res.status).toBe(200)
+})
+
+test("a body not sent as JSON is a 422 at body, and nothing is written", async () => {
+  const { send, create, list } = await newApp()
+  const task = await create(environment, "Launch")
+  for (const [contentType, body] of [
+    [undefined, `{"title":"Other"}`],
+    [undefined, ""],
+    ["text/plain", `{"title":"Other"}`],
+    ["text/plain", ""],
+    ["application/x-www-form-urlencoded", "title=Other"],
+    ["application/jsonx", `{"title":"Other"}`],
+    ["", `{"title":"Other"}`],
+    ["not a type", `{"title":"Other"}`]
+  ] as const) {
+    for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
+      await expectField(await send(method, path, body, sending(contentType)), "body", FALLBACK)
+    }
+  }
+  expect((await list()).tasks.map((t) => t.title)).toEqual(["Launch"])
+})
+
+test("JSON is application/json with any parameters, or application/…+json", async () => {
+  const { send } = await newApp()
+  for (const contentType of [
+    "application/json; charset=utf-8",
+    "Application/JSON",
+    "application/json;charset=UTF-8;",
+    'application/json; charset="utf-8"',
+    "application/merge-patch+json",
+    "application/vnd.api+json"
+  ]) {
+    const res = await send("POST", tasksPath, `{"title":"Launch"}`, sending(contentType))
+    expect(res.status).toBe(201)
+  }
+})
+
+test("a body that isn't a JSON object is a 422 at body", async () => {
+  const { send, create } = await newApp()
+  const task = await create(environment, "Launch")
+  for (const body of ["", " ", "{", `{"title":"a"} x`, `[{"title":"a"}]`, `"a"`, "5", "true"]) {
+    for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
+      await expectField(await send(method, path, body), "body", FALLBACK)
+    }
+  }
+})
+
+test("a field of the wrong JSON type is a 422 at body, never coerced", async () => {
+  const { send, create } = await newApp()
+  const task = await create(environment, "Launch")
+  for (const body of [
+    `{"title":123}`,
+    `{"title":true}`,
+    `{"title":["a"]}`,
+    `{"title":"Launch","status":5}`,
+    // Every field's type before any field's value.
+    `{"title":"","status":5}`
+  ]) {
+    for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
+      await expectField(await send(method, path, body), "body", FALLBACK)
+    }
+  }
+})
+
+test("keys match their fields ignoring case, as Go's decoder", async () => {
+  const { send } = await newApp()
+  const res = await send("POST", tasksPath, `{"TITLE":"Launch","Status":"done","other":1}`)
+  expect(res.status).toBe(201)
+  const task = (await res.json()) as Task
+  expect([task.title, task.status]).toEqual(["Launch", "done"])
+})
+
+test("a body over 1 MiB is a 413 before anything else, on any route", async () => {
+  const { send } = await newApp()
+  const big = `{"title":"${"x".repeat(1 << 20)}"}`
+  for (const [method, path, without] of [
+    ["POST", tasksPath, MEMBER_HEADER],
+    ["POST", tasksPath, undefined],
+    ["PATCH", `${tasksPath}/01jd8x3k7q00000000000000zz`, undefined],
+    ["PUT", `/users/${user}/profile`, undefined],
+    ["POST", "/nope", undefined]
+  ] as const) {
+    const res = await send(method, path, big, without ? { without } : {})
+    expect(res.status).toBe(413)
+    expect(res.headers.get("allow")).toBeNull()
+    expect(await res.json()).toEqual({
+      error: {
+        type: "invalid_request_error",
+        code: "PAYLOAD_TOO_LARGE",
+        message: "Request body is too large.",
+        request_id: null,
+        details: { max_size_bytes: 1048576 }
+      }
+    })
+  }
+  // Exactly 1 MiB is read.
+  const fits = `{"title":"a","pad":"${"x".repeat((1 << 20) - 22)}"}`
+  expect(Buffer.byteLength(fits)).toBe(1 << 20)
+  expect((await send("POST", tasksPath, fits)).status).toBe(201)
+})
+
+test("list parameters, as Go reads them", async () => {
+  const { send, create } = await newApp()
+  for (const title of ["a", "b"]) await create(environment, title)
+  const count = async (query: string) => {
+    const res = await send("GET", `${tasksPath}${query}`)
+    expect(res.status).toBe(200)
+    return ((await res.json()) as { tasks: Task[] }).tasks.length
+  }
+  expect(await count("?limit=%2B1")).toBe(1) // a sign, as strconv.Atoi takes it
+  expect(await count("?limit=001")).toBe(1)
+  expect(await count("?limit=%201%20")).toBe(1) // trimmed
+  expect(await count("?limit=1000")).toBe(2) // clamped
+  expect(await count("?limit=")).toBe(2) // empty is the default
+  expect(await count("?limit=1&limit=abc")).toBe(1) // the first value
+  for (const limit of ["abc", "1.5", "0", "-1", "-0", "1e2", "99999999999999999999", "%2B"]) {
+    await expectField(await send("GET", `${tasksPath}?limit=${limit}`), "limit", FALLBACK)
+  }
+  for (const after of ["nope", "01JD8X3K7Q0000000000000000", "81jd8x3k7q0000000000000000", "01jd8x3k7q000000000000000i"]) {
+    await expectField(await send("GET", `${tasksPath}?starting_after=${after}`), "starting_after", FALLBACK)
+  }
+  // The limit first.
+  await expectField(await send("GET", `${tasksPath}?limit=x&starting_after=x`), "limit", FALLBACK)
+})
+
+test("request_id is X-Request-ID as sent, or null", async () => {
+  const { send } = await newApp()
+  for (const [sent, want] of [[undefined, null], ["", null], ["req-1", "req-1"]] as const) {
+    const res = await send(
+      "GET",
+      `${tasksPath}/01jd8x3k7q00000000000000zz`,
+      undefined,
+      sent === undefined ? {} : { headers: { "x-request-id": sent } }
+    )
+    expect((await errorOf(res)).request_id).toBe(want)
+  }
+})
+
+test("audit details: sorted keys, HTML and non-ASCII escaped", async () => {
+  const { send } = await newApp()
+  const res = await send("POST", tasksPath, JSON.stringify({ title: "<é😀&>" }))
+  const task = (await res.json()) as Task
+  expect(res.headers.get(DETAILS_HEADER)).toBe(
+    `{"assignee_id":null,"status":"todo","task_id":"${task.id}","title":"\\u003c\\u00e9\\ud83d\\ude00\\u0026\\u003e"}`
+  )
+})
+
+test("times are RFC 3339 UTC without trailing zeros, as Go's RFC3339Nano", async () => {
+  const { create } = await newApp()
+  setSystemTime(new Date("2026-10-28T00:00:00.100Z"))
+  try {
+    const task = (await create(environment, "Launch")) as Task & { created_at: string; updated_at: string }
+    expect(task.created_at).toBe("2026-10-28T00:00:00.1Z")
+    expect(task.updated_at).toBe(task.created_at)
+  } finally {
+    setSystemTime()
+  }
+})
+
+test("the request log: the route's template or unknown, warn on a 4xx", async () => {
+  const { send, logged } = await newApp()
+  await send("GET", tasksPath)
+  await send("GET", `${tasksPath}/01jd8x3k7q00000000000000zz`, undefined, { headers: { "x-request-id": "req-2" } })
+  await send("GET", "/nope/01jd8x3k7q00000000000000zz")
+  await send("PATCH", `/users/${user}/profile`, "{}")
+  const [ok, missing, unknown, wrongMethod] = logged().filter((line) => line.message === "request completed")
+  expect(ok!.route).toBe("/environments/:environment_id/tasks")
+  expect(ok!.level).toBe("info")
+  expect("request_id" in ok!).toBe(false)
+  expect([ok!.node_id, ok!.member_id]).toEqual([environment, member])
+  expect(missing!.route).toBe("/environments/:environment_id/tasks/:task_id")
+  expect(missing!.level).toBe("warn")
+  expect(missing!.request_id).toBe("req-2")
+  expect([unknown!.route, unknown!.level]).toEqual(["unknown", "warn"])
+  // No route, so no user id.
+  expect([wrongMethod!.route, wrongMethod!.user_id]).toEqual(["unknown", undefined])
 })

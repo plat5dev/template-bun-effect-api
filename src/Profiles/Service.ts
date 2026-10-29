@@ -1,9 +1,13 @@
 import { Effect, Option } from "effect"
 import { Profile } from "../domain/Profile.js"
 import * as Audit from "../plat5/Audit.js"
+import { charLength, type Fields, optionalString } from "../plat5/Body.js"
+import { now } from "../plat5/Clock.js"
+import { fieldError } from "../plat5/Errors.js"
 import { ProfilesRepo } from "./Repo.js"
 
-const now = () => new Date().toISOString()
+/** A bio's longest, in characters. */
+const MAX_BIO = 2000
 
 export class Profiles extends Effect.Service<Profiles>()("Profiles", {
   effect: Effect.gen(function*() {
@@ -28,18 +32,23 @@ export class Profiles extends Effect.Service<Profiles>()("Profiles", {
         Effect.withSpan("Profiles.getOrCreate", { attributes: { "plat5.user_id": userId } })
       )
 
-    const upsert = (
-      userId: string,
-      payload: { bio: string }
-    ) =>
+    /** `bio` is required, and kept as sent: not trimmed, and "" is a bio. */
+    const upsert = (userId: string, fields: Fields) =>
       Effect.gen(function*() {
+        const bio = yield* optionalString(fields, "bio")
+        if (bio === undefined) {
+          return yield* Effect.fail(fieldError("bio", "Bio is required."))
+        }
+        if (charLength(bio) > MAX_BIO) {
+          return yield* Effect.fail(fieldError("bio", "Bio is too long."))
+        }
         const ts = now()
         const existing = yield* repo.findByUserId(userId)
         if (Option.isSome(existing)) {
           const before = existing.value
           const updated = yield* repo.update({
             ...before,
-            bio: payload.bio,
+            bio,
             updated_at: ts
           })
           const changes: Audit.Details = {}
@@ -50,7 +59,7 @@ export class Profiles extends Effect.Service<Profiles>()("Profiles", {
         const created = yield* repo.insert(
           Profile.insert.make({
             user_id: userId,
-            bio: payload.bio,
+            bio,
             created_at: ts,
             updated_at: ts
           })

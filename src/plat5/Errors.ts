@@ -171,8 +171,11 @@ export const conflict = (
   }
 })
 
+/** The largest request body the API reads: 1 MiB. */
+export const MAX_BODY_BYTES = 1024 * 1024
+
 export const payloadTooLarge = (
-  maxSizeBytes: number,
+  maxSizeBytes = MAX_BODY_BYTES,
   requestId: string | null = null
 ): PayloadTooLarge => ({
   error: {
@@ -184,14 +187,12 @@ export const payloadTooLarge = (
   }
 })
 
-export const internalError = (
-  message = "An unexpected error occurred.",
-  requestId: string | null = null
-): InternalError => ({
+/** A 500. Its message is always the fallback sentence: never a framework's or a library's. */
+export const internalError = (requestId: string | null = null): InternalError => ({
   error: {
     type: "api_error",
     code: "INTERNAL_ERROR",
-    message,
+    message: "An unexpected error occurred.",
     request_id: requestId,
     details: null
   }
