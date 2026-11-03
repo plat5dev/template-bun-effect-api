@@ -1,33 +1,33 @@
 /**
- * Follows identity's two feeds, so the API's data goes when its environment or its person
- * does (plat5 docs/concepts/lifecycle.md#lifecycle-events).
+ * Follows identity's lifecycle log, so the API's data goes when its environment or its
+ * person does (plat5 docs/concepts/lifecycle.md#following-the-log).
  *
- * On the tree feed, the only event it acts on is `node.purged` for an environment: that
- * environment's tasks are deleted. A purged project's environments are purged with it,
- * each with its own event. Tasks are authored, so `member.removed` keeps them, and there is
- * no background work to stop on `node.deleted`. On the user feed, the only one is
- * `user.deleted`: that person's profile is deleted. Each feed has its own cursor, the last
- * event id acted on, kept in SQLite and advanced after acting on each page; acting again on
- * the same event changes nothing.
+ * It asks only for the two events it acts on. `node.purged` for an environment deletes that
+ * environment's tasks; a purged project's environments are purged with it, each with its
+ * own event. `user.deleted` deletes that person's profile. Tasks are authored, so
+ * `member.removed` keeps them. One cursor, the last event id acted on, is kept in SQLite
+ * with the data it cleans up, and saved in the same transaction as a page's deletes. Acting
+ * again on the same event changes nothing, so the log can be replayed by resetting it.
  */
 import { FetchHttpClient, HttpClient } from "@effect/platform"
 import { SqlClient } from "@effect/sql"
-import { Cause, Duration, Effect, Layer, Schedule } from "effect"
+import { Cause, Duration, Effect, Layer } from "effect"
 import { AppConfig } from "./AppConfig.js"
 import { trackDb } from "./plat5/DbMetrics.js"
 import { ProfilesRepo } from "./Profiles/Repo.js"
 import { SqlLive } from "./Sql.js"
 import { TasksRepo } from "./Tasks/Repo.js"
 
-/** The time between polls while the feeds are caught up. */
-export const INTERVAL = Duration.seconds(5)
+/** The events the API acts on, and the only ones it asks for. */
+export const TYPES = "node.purged,user.deleted"
+/** The wait after a failed read before asking again. */
+export const RETRY_AFTER = Duration.seconds(5)
+/** Identity waits up to 25 s before a 204, so a read may take that long. */
+const REQUEST_TIMEOUT = Duration.seconds(40)
 const PAGE_SIZE = 100
 
-/**
- * The part of an event the API reads: each field a string, "" when absent or null. A tree
- * event's `kind` and `node_id` are a node event's; a user event's `user_id` is its person.
- */
-type Event = {
+/** The part of an event the API reads: each field a string, "" when absent or null. */
+export type Event = {
   readonly id: string
   readonly type: string
   readonly kind: string
@@ -51,32 +51,18 @@ const decodeEvent = (raw: unknown): Event => {
   return event as Event
 }
 
-/**
- * A feed's page: its events under the feed's own `key`, a list or null, and `has_more`, a
- * boolean or null. Either missing, or of another type, is an error.
- */
-export const decodePage = (
-  feed: string,
-  key: string,
-  page: unknown
-): { readonly events: ReadonlyArray<Event>; readonly has_more: boolean } => {
+/** A page of the log: its `events`, a list. Missing, null, or another type is an error. */
+export const decodePage = (page: unknown): ReadonlyArray<Event> => {
   if (typeof page !== "object" || page === null || Array.isArray(page)) {
-    throw new Error(`${feed} feed: not an object`)
+    throw new Error("lifecycle log: not an object")
   }
-  const p = page as Record<string, unknown>
-  const events = p[key]
-  if (!(key in p)) throw new Error(`${feed} feed: ${key}: missing`)
-  if (events !== null && !Array.isArray(events)) throw new Error(`${feed} feed: ${key}: not a list`)
-  if (!("has_more" in p)) throw new Error(`${feed} feed: has_more: missing`)
-  const more = p.has_more
-  if (more !== null && typeof more !== "boolean") {
-    throw new Error(`${feed} feed: has_more: not a boolean`)
+  const events = (page as Record<string, unknown>).events
+  if (events === undefined || events === null) {
+    throw new Error("lifecycle log: no events in its answer")
   }
-  return { events: (events ?? []).map(decodeEvent), has_more: more === true }
+  if (!Array.isArray(events)) throw new Error("lifecycle log: events: not a list")
+  return events.map(decodeEvent)
 }
-
-/** A feed's name: its row in feed_cursors, and its logs' `feed`. */
-type FeedName = "tree" | "user"
 
 const log = (level: string, message: string, fields: Record<string, unknown> = {}) =>
   Effect.sync(() =>
@@ -91,83 +77,71 @@ const log = (level: string, message: string, fields: Record<string, unknown> = {
     )
   )
 
-/** Reads the feeds at `identityUrl`, identity's internal base URL. */
-export const consumer = (identityUrl: string) =>
+const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+/**
+ * Reads the log at `identityUrl`, identity's internal base URL. `retry` is the wait after
+ * an error, or after an immediate answer with no events.
+ */
+export const consumer = (identityUrl: string, retry: Duration.DurationInput = RETRY_AFTER) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const tasks = yield* TasksRepo
     const profiles = yield* ProfilesRepo
-    // A poll every few seconds isn't a request worth a trace.
+    // A read held open for up to 25 s isn't a request worth a trace.
     const client = (yield* HttpClient.HttpClient).pipe(
-      HttpClient.filterStatus((status) => status === 200),
       HttpClient.withTracerDisabledWhen(() => true)
     )
+    const url = `${identityUrl}/internal/events`
 
-    /** The last event id acted on in the feed, or "" before the first. */
-    const cursor = (feed: FeedName) =>
-      sql<{ event_id: string }>`
-        SELECT event_id FROM feed_cursors WHERE feed = ${feed}
-      `.pipe(
-        Effect.map((rows) => rows[0]?.event_id ?? ""),
-        trackDb("feed_cursors.find")
-      )
+    /** The last event id acted on, or "" before the first. */
+    const cursor = sql<{ event_id: string }>`
+      SELECT event_id FROM feed_cursors WHERE id = 1
+    `.pipe(
+      Effect.map((rows) => rows[0]?.event_id ?? ""),
+      trackDb("feed_cursors.find")
+    )
 
-    const saveCursor = (feed: FeedName, eventId: string) =>
+    const saveCursor = (eventId: string) =>
       sql`
-        INSERT INTO feed_cursors (feed, event_id) VALUES (${feed}, ${eventId})
-        ON CONFLICT (feed) DO UPDATE SET event_id = excluded.event_id
+        INSERT INTO feed_cursors (id, event_id) VALUES (1, ${eventId})
+        ON CONFLICT (id) DO UPDATE SET event_id = excluded.event_id
       `.pipe(Effect.asVoid, trackDb("feed_cursors.save"))
 
     /**
-     * Reads the feed `name` at `path` from its cursor until it has no more, acting on each
-     * page and then advancing the cursor past it. A failure is logged with the feed's name,
-     * and the feed is read again on the next poll.
+     * Asks for the events after `after`, or from the first event when there's none yet.
+     * With a cursor identity waits for one; its 204 is no events, and `waited`.
      */
-    const follow = (
-      name: FeedName,
-      path: string,
-      key: string,
-      act: (event: Event) => Effect.Effect<void>
-    ) => {
-      const fetchPage = (after: string) =>
-        client.get(`${identityUrl}${path}`, {
-          urlParams: after === ""
-            ? { limit: PAGE_SIZE }
-            : { limit: PAGE_SIZE, starting_after: after }
-        }).pipe(
-          Effect.flatMap((res) => res.json),
-          Effect.flatMap((page) => Effect.try(() => decodePage(name, key, page))),
-          Effect.scoped,
-          Effect.timeout(Duration.seconds(10))
-        )
-
-      return Effect.gen(function*() {
-        let after = yield* cursor(name)
-        for (;;) {
-          const { events, has_more } = yield* fetchPage(after)
-          yield* Effect.forEach(events, act, { discard: true })
-          const last = events.at(-1)
-          if (last) {
-            after = last.id
-            yield* saveCursor(name, after)
-          }
-          if (!has_more) return
-        }
+    const fetchPage = (after: string) =>
+      client.get(url, {
+        urlParams: after === ""
+          ? { types: TYPES, limit: PAGE_SIZE }
+          : { types: TYPES, limit: PAGE_SIZE, after }
       }).pipe(
-        Effect.catchAllCause((cause) => {
-          const err = Cause.squash(cause)
-          return log("error", "lifecycle poll failed", {
-            feed: name,
-            error_message: err instanceof Error ? err.message : String(err)
-          })
-        })
+        Effect.flatMap((res) => {
+          if (res.status === 204) {
+            return Effect.succeed({ events: [] as ReadonlyArray<Event>, waited: true })
+          }
+          if (res.status !== 200) {
+            return Effect.fail(new Error(`lifecycle log answered ${res.status}`))
+          }
+          return res.json.pipe(
+            Effect.flatMap((page) =>
+              Effect.try({
+                try: () => decodePage(page),
+                catch: (err) => new Error(errorMessage(err))
+              })
+            ),
+            Effect.map((events) => ({ events, waited: false }))
+          )
+        }),
+        Effect.scoped,
+        Effect.timeout(REQUEST_TIMEOUT)
       )
-    }
 
-    const actOnTree = (event: Event) =>
-      event.type !== "node.purged" || event.kind !== "environment"
-        ? Effect.void
-        : tasks.deleteByEnvironment(event.node_id).pipe(
+    const act = (event: Event): Effect.Effect<void> => {
+      if (event.type === "node.purged" && event.kind === "environment") {
+        return tasks.deleteByEnvironment(event.node_id).pipe(
           Effect.zipRight(
             log("info", "purged environment's tasks deleted", {
               event_id: event.id,
@@ -175,11 +149,9 @@ export const consumer = (identityUrl: string) =>
             })
           )
         )
-
-    const actOnUser = (event: Event) =>
-      event.type !== "user.deleted"
-        ? Effect.void
-        : profiles.deleteByUserId(event.user_id).pipe(
+      }
+      if (event.type === "user.deleted") {
+        return profiles.deleteByUserId(event.user_id).pipe(
           Effect.zipRight(
             log("info", "profile deleted with its account", {
               event_id: event.id,
@@ -187,22 +159,81 @@ export const consumer = (identityUrl: string) =>
             })
           )
         )
+      }
+      return Effect.void
+    }
 
     /**
-     * Reads the tree feed to its end, then the user feed. A feed that fails doesn't stop the
-     * other.
+     * Acts on a page and saves its last id as the cursor in one transaction: the deletes and
+     * the cursor commit together or not at all.
      */
-    const poll = Effect.zipRight(
-      follow("tree", "/internal/tree-events", "tree_events", actOnTree),
-      follow("user", "/internal/user-events", "user_events", actOnUser)
-    )
+    const apply = (events: ReadonlyArray<Event>, last: string) =>
+      Effect.forEach(
+        events,
+        (event) =>
+          act(event).pipe(
+            Effect.catchAllDefect((defect) =>
+              Effect.fail(new Error(`event ${event.id}: ${errorMessage(defect)}`))
+            )
+          ),
+        { discard: true }
+      ).pipe(
+        Effect.zipRight(saveCursor(last)),
+        sql.withTransaction
+      )
 
-    return { poll } as const
+    /**
+     * Asks once for the events after the saved cursor, acts on them, and saves the cursor
+     * past them in the same transaction as their deletes. Succeeds with whether to ask again
+     * at once: after a page of events, or a 204 (identity waited and nothing came).
+     */
+    const step = Effect.gen(function*() {
+      const after = yield* cursor
+      const { events, waited } = yield* fetchPage(after)
+      const last = events.at(-1)
+      if (last === undefined) return waited
+      yield* apply(events, last.id)
+      yield* log("info", "lifecycle page read", { events: events.length, after, cursor: last.id })
+      return true
+    })
+
+    /**
+     * Follows the log until interrupted, which also cancels a read in flight. After a page or
+     * a 204 it asks again at once; after an error it logs it and asks again after `retry`.
+     * An immediate answer with no events (an empty log, or a cursor past identity's newest
+     * event) is also asked again after `retry`, so it isn't asked in a tight loop.
+     */
+    const run = Effect.gen(function*() {
+      // A failure here fails the first step the same way, and is logged there.
+      yield* cursor.pipe(
+        Effect.flatMap((after) =>
+          after === ""
+            ? log("info", "following the lifecycle log from its first event")
+            : log("info", "following the lifecycle log", { after })
+        ),
+        Effect.ignore
+      )
+      return yield* step.pipe(
+        Effect.catchAllCause((cause) =>
+          Cause.isInterruptedOnly(cause)
+            ? Effect.failCause(cause)
+            : log("error", "lifecycle read failed", {
+              error_message: errorMessage(Cause.squash(cause)),
+              retry_in_ms: Duration.toMillis(retry)
+            }).pipe(Effect.as(false))
+        ),
+        Effect.flatMap((again) => (again ? Effect.void : Effect.sleep(retry))),
+        Effect.forever
+      )
+    })
+
+    return { cursor, step, run } as const
   })
 
 /**
- * Polls now and every `INTERVAL` for as long as the app runs. With `IDENTITY_INTERNAL_URL`
- * unset neither feed is read, and the app says so once at boot.
+ * Follows the log for as long as the app runs. Shutting down interrupts it, cancelling a
+ * read in flight, and waits for it before the database closes. With
+ * `IDENTITY_INTERNAL_URL` unset the log isn't read, and the app says so once at boot.
  */
 export const LifecycleLive = Layer.unwrapEffect(
   Effect.gen(function*() {
@@ -211,15 +242,13 @@ export const LifecycleLive = Layer.unwrapEffect(
       return Layer.effectDiscard(
         log(
           "warn",
-          "IDENTITY_INTERNAL_URL is unset: not reading identity's feeds, so a purged environment's tasks and a deleted person's profile are kept, and a task's assignee can't be checked (503)"
+          "IDENTITY_INTERNAL_URL is unset: not reading identity's lifecycle log, so a purged environment's tasks and a deleted person's profile are kept, and a task's assignee can't be checked (503)"
         )
       )
     }
     return Layer.scopedDiscard(
       consumer(config.identityInternalUrl).pipe(
-        Effect.flatMap(({ poll }) =>
-          poll.pipe(Effect.repeat(Schedule.fixed(INTERVAL)), Effect.forkScoped)
-        )
+        Effect.flatMap(({ run }) => Effect.forkScoped(run))
       )
     ).pipe(
       Layer.provide(TasksRepo.Default),

@@ -1,10 +1,10 @@
 import { FetchHttpClient } from "@effect/platform"
 import { SqlClient } from "@effect/sql"
 import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { ConfigProvider, Effect, Exit, Layer, Option, Scope } from "effect"
+import { ConfigProvider, Duration, Effect, Exit, Fiber, Layer, Option, Scope } from "effect"
 import { Profile } from "./domain/Profile.js"
 import { Task, TaskId } from "./domain/Task.js"
-import { consumer, decodePage } from "./Lifecycle.js"
+import { consumer, decodePage, type Event, TYPES } from "./Lifecycle.js"
 import { ProfilesRepo } from "./Profiles/Repo.js"
 import { SqlLive } from "./Sql.js"
 import { TasksRepo } from "./Tasks/Repo.js"
@@ -15,51 +15,96 @@ const gone = "01jd8x3k7q00000000000000u1"
 const stays = "01jd8x3k7q00000000000000u2"
 const fresh = "01jd8x3k7q00000000000000u3"
 
-type Event = { id: string; type: string; [field: string]: string }
+type Served = Partial<Event> & { id: string; type: string }
 
-/** One feed as identity serves it: its events, two to a page, and each cursor asked for. */
-type Served = { key: string; events: Event[]; asked: string[]; fail: boolean | number }
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** Identity, serving the tree and user feeds at their paths. */
-const serveIdentity = (tree: Event[], user: Event[]) => {
-  const feeds: Record<string, Served> = {
-    "/internal/tree-events": { key: "tree_events", events: tree, asked: [], fail: false },
-    "/internal/user-events": { key: "user_events", events: user, asked: [], fail: false }
+/**
+ * Identity, serving the one lifecycle log at /internal/events as identity does: types
+ * filters, two events to a page, no after is answered at once, and with after it waits for
+ * a matching event up to `wait` ms, then answers 204. The first `fail` requests answer 500.
+ */
+const serveIdentity = (events: Served[] = []) => {
+  const identity = {
+    wait: 50,
+    fail: 0,
+    /** Each request's after, types and limit. */
+    asked: [] as string[],
+    types: [] as string[],
+    limits: [] as string[],
+    url: "",
+    /** Appends an event and wakes any waiting read. */
+    add(event: Served) {
+      events.push(event)
+      for (const wake of [...added]) wake()
+    },
+    /** Resolves when a read is next waiting. */
+    nextWait: () => new Promise<void>((resolve) => waiting.push(resolve))
   }
-  const limits: string[] = []
+  const added = new Set<() => void>()
+  const waiting: (() => void)[] = []
+
+  /** The events after `after` that match `types`, at most two, and whether more follow. */
+  const page = (after: string, types: string[]) => {
+    const match = events.filter((e) => Number(e.id) > Number(after) && types.includes(e.type))
+    return { events: match.slice(0, 2), has_more: match.length > 2 }
+  }
+
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
-    fetch(req) {
+    idleTimeout: 0,
+    async fetch(req) {
       const url = new URL(req.url)
-      const feed = feeds[url.pathname]
-      if (!feed) return new Response(null, { status: 404 })
-      if (feed.fail === true) return new Response(null, { status: 503 })
-      // Another success than 200, with a page that would otherwise do.
-      if (feed.fail) return Response.json({ [feed.key]: feed.events, has_more: false }, { status: feed.fail })
-      const after = url.searchParams.get("starting_after") ?? ""
-      feed.asked.push(after)
-      limits.push(url.searchParams.get("limit") ?? "")
-      const rest = feed.events.filter((e) => Number(e.id) > Number(after))
-      return Response.json({ [feed.key]: rest.slice(0, 2), has_more: rest.length > 2 })
+      if (url.pathname !== "/internal/events") return new Response(null, { status: 404 })
+      const after = url.searchParams.get("after") ?? ""
+      const types = (url.searchParams.get("types") ?? "").split(",")
+      identity.asked.push(after)
+      identity.types.push(url.searchParams.get("types") ?? "")
+      identity.limits.push(url.searchParams.get("limit") ?? "")
+      if (identity.fail > 0) {
+        identity.fail--
+        return new Response(null, { status: 500 })
+      }
+      let answer = page(after, types)
+      const deadline = performance.now() + identity.wait
+      while (after !== "" && answer.events.length === 0) {
+        const left = deadline - performance.now()
+        const outcome = await new Promise<"added" | "timeout" | "closed">((resolve) => {
+          const done = (outcome: "added" | "timeout" | "closed") => {
+            added.delete(onAdd)
+            clearTimeout(timer)
+            req.signal.removeEventListener("abort", onClose)
+            resolve(outcome)
+          }
+          const onAdd = () => done("added")
+          const onClose = () => done("closed")
+          const timer = setTimeout(() => done("timeout"), Math.max(0, left))
+          added.add(onAdd)
+          req.signal.addEventListener("abort", onClose)
+          // Tell a test the read is waiting, if it's listening.
+          waiting.shift()?.()
+        })
+        if (outcome === "closed") return new Response(null, { status: 499 })
+        if (outcome === "timeout") return new Response(null, { status: 204 })
+        answer = page(after, types)
+      }
+      return Response.json(answer)
     }
   })
   onTestFinished(() => server.stop(true))
-  return {
-    url: `http://127.0.0.1:${server.port}`,
-    tree: feeds["/internal/tree-events"]!,
-    user: feeds["/internal/user-events"]!,
-    limits
-  }
+  identity.url = `http://127.0.0.1:${server.port}`
+  return identity
 }
+
+type Identity = ReturnType<typeof serveIdentity>
 
 const StoresLive = Layer.mergeAll(SqlLive, TasksRepo.Default, ProfilesRepo.Default, FetchHttpClient.layer)
 
-const setup = async (tree: Event[], user: Event[]) => {
+const setup = async (identity: Identity, retry: Duration.DurationInput = Duration.millis(10)) => {
   // The consumer's lines, to read and to keep out of the test output.
   const logs = spyOn(console, "log").mockImplementation(() => {})
   onTestFinished(() => logs.mockRestore())
-  const identity = serveIdentity(tree, user)
   const scope = Effect.runSync(Scope.make())
   onTestFinished(() => Effect.runPromise(Scope.close(scope, Exit.void)))
   const context = await Effect.runPromise(
@@ -71,13 +116,13 @@ const setup = async (tree: Event[], user: Event[]) => {
       )
     )
   )
-  const run = <A, E>(
+  const exec = <A, E>(
     effect: Effect.Effect<A, E, SqlClient.SqlClient | TasksRepo | ProfilesRepo>
   ) => Effect.runPromise(Effect.provide(effect, context))
-  const { poll } = await Effect.runPromise(Effect.provide(consumer(identity.url), context))
+  const c = await exec(consumer(identity.url, retry).pipe(Effect.provide(context)))
 
   const addTask = (id: string, environmentId: string) =>
-    run(Effect.flatMap(TasksRepo, (tasks) =>
+    exec(Effect.flatMap(TasksRepo, (tasks) =>
       tasks.insert(Task.insert.make({
         id: TaskId.make(id),
         environment_id: environmentId,
@@ -89,162 +134,228 @@ const setup = async (tree: Event[], user: Event[]) => {
         updated_at: "now"
       }))))
   const count = (environmentId: string) =>
-    run(Effect.flatMap(TasksRepo, (tasks) =>
+    exec(Effect.flatMap(TasksRepo, (tasks) =>
       tasks.listByEnvironment(environmentId, { limit: 100, startingAfter: "" }).pipe(
         Effect.map((page) => page.items.length)
       )))
   const addProfile = (userId: string) =>
-    run(Effect.flatMap(ProfilesRepo, (profiles) =>
+    exec(Effect.flatMap(ProfilesRepo, (profiles) =>
       profiles.insert(
         Profile.insert.make({ user_id: userId, bio: "hi", created_at: "now", updated_at: "now" })
       )))
   const hasProfile = (userId: string) =>
-    run(Effect.flatMap(ProfilesRepo, (profiles) =>
+    exec(Effect.flatMap(ProfilesRepo, (profiles) =>
       profiles.findByUserId(userId).pipe(Effect.map(Option.isSome))))
-  const cursor = (feed: "tree" | "user") =>
-    run(Effect.flatMap(SqlClient.SqlClient, (sql) =>
-      sql<{ event_id: string }>`SELECT event_id FROM feed_cursors WHERE feed = ${feed}`.pipe(
-        Effect.map((rows) => rows[0]?.event_id ?? "")
-      )))
-  const forgetCursors = () =>
-    run(Effect.flatMap(SqlClient.SqlClient, (sql) => sql`DELETE FROM feed_cursors`))
+  const sqlExec = (statement: string) =>
+    exec(Effect.flatMap(SqlClient.SqlClient, (sql) => sql.unsafe(statement)))
   const logged = (): Record<string, unknown>[] =>
     logs.mock.calls.map((call) => JSON.parse(String(call[0])))
 
+  const seed = async () => {
+    await addTask("01jd8x3k7q0000000000000t01", purged)
+    await addTask("01jd8x3k7q0000000000000t02", kept)
+    await addProfile(gone)
+    await addProfile(stays)
+  }
+  const checkActed = async () => {
+    expect(await count(purged)).toBe(0)
+    expect(await count(kept)).toBe(1)
+    expect(await hasProfile(gone)).toBe(false)
+    expect(await hasProfile(stays)).toBe(true)
+    // user.created makes nothing: a profile is made on the person's first call.
+    expect(await hasProfile(fresh)).toBe(false)
+  }
+
+  /** Forks the consumer's run; `stop` interrupts it, failing unless it ends within 2 s. */
+  const start = () => {
+    const fiber = Effect.runFork(c.run)
+    const stop = async () => {
+      const ended = await Effect.runPromise(
+        Fiber.interrupt(fiber).pipe(Effect.timeoutOption(Duration.seconds(2)))
+      )
+      expect(Option.isSome(ended)).toBe(true)
+    }
+    return stop
+  }
+
+  /** Runs the consumer until `cond` holds, then stops it and waits for it to end. */
+  const runUntil = async (cond: () => Promise<boolean>) => {
+    const stop = start()
+    const deadline = performance.now() + 5_000
+    while (!(await cond())) {
+      if (performance.now() > deadline) {
+        await stop()
+        throw new Error("condition not met in 5s")
+      }
+      await sleep(5)
+    }
+    await stop()
+  }
+
   return {
-    identity,
-    poll: () => Effect.runPromise(poll),
-    addTask,
+    step: () => Effect.runPromise(c.step),
+    stepExit: () => Effect.runPromiseExit(c.step),
+    run: c.run,
+    cursor: () => Effect.runPromise(c.cursor),
+    start,
+    runUntil,
     count,
-    addProfile,
     hasProfile,
-    cursor,
-    forgetCursors,
-    logged
+    addProfile,
+    sqlExec,
+    logged,
+    seed,
+    checkActed
   }
 }
 
-test("tree feed: a purged environment's tasks go, read from its cursor", async () => {
-  const s = await setup(
-    [
-      { id: "7", type: "node.created", kind: "environment", node_id: purged },
-      { id: "8", type: "node.deleted", kind: "environment", node_id: kept },
-      { id: "9", type: "member.removed", member_id: "01jd8x3k7q00000000000000mm" },
-      { id: "10", type: "node.purged", kind: "organization", node_id: kept },
-      { id: "11", type: "node.purged", kind: "environment", node_id: purged }
-    ],
-    []
-  )
-  await s.addTask("01jd8x3k7q0000000000000t01", purged)
-  await s.addTask("01jd8x3k7q0000000000000t02", kept)
+const theLog = () =>
+  serveIdentity([
+    { id: "7", type: "node.created", kind: "environment", node_id: purged },
+    { id: "8", type: "user.created", user_id: fresh },
+    { id: "9", type: "node.purged", kind: "organization", node_id: kept },
+    { id: "10", type: "member.removed" },
+    { id: "12", type: "node.purged", kind: "environment", node_id: purged },
+    { id: "13", type: "user.deleted", user_id: gone },
+    { id: "20", type: "node.deleted", kind: "environment", node_id: kept }
+  ])
 
-  await s.poll()
-  expect(await s.count(purged)).toBe(0)
-  expect(await s.count(kept)).toBe(1)
-  // Three pages in one poll: has_more reads again at once, from each page's last id.
-  expect(s.identity.tree.asked).toEqual(["", "8", "10"])
-  expect(s.identity.limits.every((limit) => limit === "100")).toBe(true)
-  expect(await s.cursor("tree")).toBe("11")
+test("acts on each page and advances the cursor", async () => {
+  const identity = theLog()
+  const s = await setup(identity)
+  await s.seed()
 
-  // The next poll starts from the saved cursor.
-  await s.poll()
-  expect(s.identity.tree.asked.at(-1)).toBe("11")
-})
-
-test("user feed: user.deleted deletes that profile, from the user cursor", async () => {
-  const s = await setup(
-    [{ id: "900", type: "node.created", kind: "environment", node_id: kept }],
-    [
-      { id: "1", type: "user.created", user_id: fresh },
-      { id: "2", type: "user.deleted", user_id: gone },
-      { id: "3", type: "user.created", user_id: stays }
-    ]
-  )
-  await s.addProfile(gone)
-  await s.addProfile(stays)
-
-  await s.poll()
-  expect(await s.hasProfile(gone)).toBe(false)
-  expect(await s.hasProfile(stays)).toBe(true)
-  // user.created makes nothing: a profile is made on the person's first call.
-  expect(await s.hasProfile(fresh)).toBe(false)
-  expect(s.identity.user.asked).toEqual(["", "2"])
-  expect(await s.cursor("tree")).toBe("900")
-  expect(await s.cursor("user")).toBe("3")
-
-  // Each feed is asked from its own cursor.
-  await s.poll()
-  expect(s.identity.tree.asked.at(-1)).toBe("900")
-  expect(s.identity.user.asked.at(-1)).toBe("3")
-})
-
-for (const [failing, fail] of [["tree", true], ["user", true], ["tree", 201], ["user", 203]] as const) {
-  test(`the ${failing} feed failing (${fail}) doesn't stop the other`, async () => {
-    const s = await setup(
-      [{ id: "5", type: "node.purged", kind: "environment", node_id: purged }],
-      [{ id: "6", type: "user.deleted", user_id: gone }]
-    )
-    s.identity[failing].fail = fail
-    await s.addTask("01jd8x3k7q0000000000000t01", purged)
-    await s.addProfile(gone)
-
-    await s.poll()
-    expect(await s.count(purged)).toBe(failing === "tree" ? 1 : 0)
-    expect(await s.hasProfile(gone)).toBe(failing === "user")
-    // The failed feed keeps its cursor, to be read again on the next poll, and the log says
-    // which feed failed.
-    expect(await s.cursor(failing)).toBe("")
-    const failures = s.logged().filter((line) => line.message === "lifecycle poll failed")
-    expect(failures.map((line) => [line.level, line.feed])).toEqual([["error", failing]])
-  })
-}
-
-test("reading an event twice is harmless", async () => {
-  const s = await setup(
-    [{ id: "3", type: "node.purged", kind: "environment", node_id: purged }],
-    [{ id: "4", type: "user.deleted", user_id: gone }]
-  )
-  await s.addTask("01jd8x3k7q0000000000000t01", purged)
-  await s.addProfile(gone)
-
+  // No cursor yet: from the first event, then from each page's last id.
   for (let i = 0; i < 2; i++) {
-    await s.poll()
-    // Forget the cursors, so the next poll gets the same events.
-    await s.forgetCursors()
+    expect(await s.step()).toBe(true)
   }
-  expect(await s.count(purged)).toBe(0)
-  expect(await s.hasProfile(gone)).toBe(false)
-  expect(s.identity.tree.asked).toEqual(["", ""])
-  expect(s.identity.user.asked).toEqual(["", ""])
+  await s.checkActed()
+  expect(await s.cursor()).toBe("13")
+  expect(identity.asked).toEqual(["", "12"])
+  expect(TYPES).toBe("node.purged,user.deleted")
+  expect(identity.types.every((types) => types === TYPES)).toBe(true)
+  expect(identity.limits.every((limit) => limit === "100")).toBe(true)
+})
+
+test("a 204 is asked again at once", async () => {
+  const identity = theLog()
+  const s = await setup(identity)
+  await s.step()
+  await s.step()
+
+  // At the head: identity waits, answers 204, and nothing changes.
+  expect(await s.step()).toBe(true)
+  expect(await s.cursor()).toBe("13")
+  expect(identity.asked.at(-1)).toBe("13")
+})
+
+test("a waiting read gets a new event", async () => {
+  const identity = theLog()
+  identity.wait = 5_000
+  const s = await setup(identity)
+  await s.step()
+  await s.step()
+
+  void (async () => {
+    await identity.nextWait()
+    identity.add({ id: "21", type: "node.created" }) // not asked for: the wait goes on
+    await identity.nextWait()
+    identity.add({ id: "22", type: "user.deleted", user_id: stays })
+  })()
+  const started = performance.now()
+  await s.step()
+  expect(performance.now() - started).toBeLessThan(2_000)
+  expect(await s.hasProfile(stays)).toBe(false)
+  expect(await s.cursor()).toBe("22")
+})
+
+test("an error is retried", async () => {
+  const identity = theLog()
+  identity.fail = 2
+  const s = await setup(identity)
+  await s.seed()
+
+  expect(Exit.isFailure(await s.stepExit())).toBe(true)
+  expect(await s.cursor()).toBe("")
+
+  // run logs the next 500, waits its retry, and reads on.
+  await s.runUntil(async () => (await s.cursor()) === "13")
+  await s.checkActed()
+  expect(identity.asked.slice(0, 4)).toEqual(["", "", "", "12"])
+  const failures = s.logged().filter((line) => line.message === "lifecycle read failed")
+  expect(failures.map((line) => [line.level, line.error_message])).toEqual([
+    ["error", "lifecycle log answered 500"]
+  ])
+})
+
+test("an empty log is not asked in a tight loop", async () => {
+  const identity = serveIdentity()
+  const s = await setup(identity, Duration.millis(50))
+  // An immediate empty answer waits before asking again.
+  expect(await s.step()).toBe(false)
+  await Effect.runPromise(Effect.race(s.run, Effect.sleep(Duration.millis(120))))
+  expect(identity.asked.length).toBeLessThanOrEqual(5)
+})
+
+test("stopping cancels the read in flight", async () => {
+  const identity = theLog()
+  identity.wait = 60_000
+  const s = await setup(identity)
+  await s.step()
+  await s.step()
+
+  const waiting = identity.nextWait()
+  const stop = s.start()
+  await waiting
+  await stop()
   expect(s.logged().some((line) => line.level === "error")).toBe(false)
 })
 
-test("a feed's page is checked as Go reads it", () => {
-  // Its events under the feed's key and has_more, each either null; keys ignoring case.
-  expect(decodePage("tree", "tree_events", { tree_events: null, has_more: null })).toEqual({
-    events: [],
-    has_more: false
+test("replay changes nothing", async () => {
+  const identity = theLog()
+  const s = await setup(identity)
+  await s.seed()
+  await s.runUntil(async () => (await s.cursor()) === "13")
+
+  // Reset the cursor, as the README says, and read the log again from its first event.
+  await s.sqlExec("DELETE FROM feed_cursors")
+  const before = identity.asked.length
+  await s.runUntil(async () => (await s.cursor()) === "13")
+  await s.checkActed()
+  expect(identity.asked[before]).toBe("")
+  const started = s.logged().filter((line) =>
+    line.message === "following the lifecycle log from its first event"
+  )
+  expect(started.length).toBe(2)
+})
+
+test("a page commits with its cursor", async () => {
+  const identity = theLog()
+  const s = await setup(identity)
+  await s.seed()
+  // The cursor can't be saved, so the page's deletes roll back with it.
+  await s.sqlExec(
+    "CREATE TRIGGER no_cursor BEFORE INSERT ON feed_cursors BEGIN SELECT RAISE(ABORT, 'no'); END"
+  )
+  for (let i = 0; i < 2; i++) {
+    expect(Exit.isFailure(await s.stepExit())).toBe(true)
+  }
+  expect(await s.count(purged)).toBe(1)
+  expect(await s.hasProfile(gone)).toBe(true)
+  expect(await s.cursor()).toBe("")
+})
+
+test("a page as Go decodes it", () => {
+  expect(decodePage({ events: [] })).toEqual([])
+  const events = decodePage({
+    events: [{ id: "7", Type: "node.purged", kind: null, extra: 1 }, null],
+    has_more: "ignored"
   })
-  const page = decodePage("tree", "tree_events", {
-    tree_events: [{ ID: "7", Type: "node.purged", kind: "environment", node_id: null, extra: 1 }, null],
-    has_more: true
-  })
-  expect(page.events).toEqual([
-    { id: "7", type: "node.purged", kind: "environment", node_id: "", user_id: "" },
+  expect(events).toEqual([
+    { id: "7", type: "node.purged", kind: "", node_id: "", user_id: "" },
     { id: "", type: "", kind: "", node_id: "", user_id: "" }
   ])
-  expect(page.has_more).toBe(true)
-  // Missing, or of another type, is an error.
-  for (const bad of [
-    null,
-    [],
-    { has_more: false },
-    { tree_events: [] },
-    { tree_events: {}, has_more: false },
-    { tree_events: [], has_more: "true" },
-    { tree_events: [5], has_more: false },
-    { tree_events: [{ id: 7 }], has_more: false }
-  ]) {
-    expect(() => decodePage("tree", "tree_events", bad)).toThrow()
+  for (const page of [[], null, {}, { events: null }, { events: {} }, { events: [{ id: 7 }] }, { events: ["x"] }]) {
+    expect(() => decodePage(page)).toThrow()
   }
 })

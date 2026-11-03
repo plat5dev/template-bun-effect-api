@@ -19,6 +19,9 @@ const MainLive = Layer.mergeAll(PublicHttpLive, InternalHttpLive, LifecycleLive)
   Layer.provide(TelemetryLive)
 )
 
+// SIGINT or SIGTERM interrupts it (runMain): both servers shut down, and so does the
+// lifecycle reader, its read in flight cancelled. The reader ends before SQL closes, since
+// layers are released in reverse order.
 const program = ensureDataDir.pipe(
   Effect.andThen(Layer.launch(MainLive)),
   Effect.provide(AppConfig.Live),
