@@ -70,7 +70,9 @@ for (const decision of [true, false]) {
 }
 
 for (const [name, status, body] of [
+  ["unavailable", 503, `{"error":{"code":"SERVICE_UNAVAILABLE"}}`],
   ["not 200", 500, `{"decision":true}`],
+  ["bad request", 400, `{"error":{"code":"INVALID_REQUEST"}}`],
   ["no decision", 200, `{}`],
   ["decision not a boolean", 200, `{"decision":"true"}`],
   ["not JSON", 200, `yes`]

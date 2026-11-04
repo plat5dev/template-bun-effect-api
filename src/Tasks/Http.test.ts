@@ -295,6 +295,7 @@ test("a refused assignee is a 422, and nothing is written", async () => {
 })
 
 for (const [name, status, answer, identityUnset] of [
+  ["identity answers 503", 503, `{"error":{"code":"SERVICE_UNAVAILABLE"}}`, false],
   ["identity answers 500", 500, `{"error":{}}`, false],
   ["identity answers without a decision", 200, `{}`, false],
   ["IDENTITY_INTERNAL_URL unset", 200, `{"decision":true}`, true]

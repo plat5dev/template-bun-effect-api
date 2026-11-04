@@ -22,12 +22,14 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /**
  * Identity, serving the one lifecycle log at /internal/events as identity does: types
  * filters, two events to a page, no after is answered at once, and with after it waits for
- * a matching event up to `wait` ms, then answers 204. The first `fail` requests answer 500.
+ * a matching event up to `wait` ms, then answers 204. The first requests answer `fail`'s
+ * statuses, one each.
  */
 const serveIdentity = (events: Served[] = []) => {
   const identity = {
     wait: 50,
-    fail: 0,
+    /** Statuses for the first requests. */
+    fail: [] as number[],
     /** Each request's after, types and limit. */
     asked: [] as string[],
     types: [] as string[],
@@ -62,10 +64,8 @@ const serveIdentity = (events: Served[] = []) => {
       identity.asked.push(after)
       identity.types.push(url.searchParams.get("types") ?? "")
       identity.limits.push(url.searchParams.get("limit") ?? "")
-      if (identity.fail > 0) {
-        identity.fail--
-        return new Response(null, { status: 500 })
-      }
+      const failure = identity.fail.shift()
+      if (failure !== undefined) return new Response(null, { status: failure })
       let answer = page(after, types)
       const deadline = performance.now() + identity.wait
       while (after !== "" && answer.events.length === 0) {
@@ -271,14 +271,15 @@ test("a waiting read gets a new event", async () => {
 
 test("an error is retried", async () => {
   const identity = theLog()
-  identity.fail = 2
+  // Identity's Postgres unavailable is a 503; any other failure, a 500.
+  identity.fail = [503, 500]
   const s = await setup(identity)
   await s.seed()
 
   expect(Exit.isFailure(await s.stepExit())).toBe(true)
   expect(await s.cursor()).toBe("")
 
-  // run logs the next 500, waits its retry, and reads on.
+  // run logs the 500, waits its retry, and reads on.
   await s.runUntil(async () => (await s.cursor()) === "13")
   await s.checkActed()
   expect(identity.asked.slice(0, 4)).toEqual(["", "", "", "12"])
