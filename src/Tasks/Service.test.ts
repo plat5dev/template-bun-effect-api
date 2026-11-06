@@ -8,10 +8,10 @@ import { SqlLive } from "../Sql.js"
 import { TasksRepo } from "./Repo.js"
 import { Tasks } from "./Service.js"
 
-const environment = "01jd8x3k7q0000000000000000"
+const project = "01jd8x3k7q0000000000000000"
 const other = "01jd8x3k7q0000000000000001"
 const member = "01jd8x3k7q00000000000000mm"
-const from = { projectId: undefined, requestId: "" }
+const from = { requestId: "" }
 
 /** A repo whose reads find the task, and then it's deleted: a delete between read and write. */
 const RacyRepoLive = Layer.effect(
@@ -21,8 +21,8 @@ const RacyRepoLive = Layer.effect(
     const sql = yield* SqlClient.SqlClient
     return TasksRepo.make({
       ...real,
-      findInEnvironment: (environmentId, id) =>
-        real.findInEnvironment(environmentId, id).pipe(
+      findInProject: (projectId, id) =>
+        real.findInProject(projectId, id).pipe(
           Effect.tap(() => sql`DELETE FROM tasks WHERE id = ${id}`.pipe(Effect.orDie))
         )
     })
@@ -52,11 +52,11 @@ test("PATCH and DELETE answer 404 when the scoped write finds no row", async () 
   const result = await run(
     Effect.gen(function*() {
       const tasks = yield* Tasks
-      const a = yield* tasks.create(environment, member, { title: "Launch" }, from)
-      const b = yield* tasks.create(environment, member, { title: "Land" }, from)
+      const a = yield* tasks.create(project, member, { title: "Launch" }, from)
+      const b = yield* tasks.create(project, member, { title: "Land" }, from)
       return [
-        yield* Effect.flip(tasks.update(environment, a.id, { status: "done" }, from)),
-        yield* Effect.flip(tasks.remove(environment, b.id))
+        yield* Effect.flip(tasks.update(project, a.id, { status: "done" }, from)),
+        yield* Effect.flip(tasks.remove(project, b.id))
       ]
     }),
     true
@@ -67,16 +67,16 @@ test("PATCH and DELETE answer 404 when the scoped write finds no row", async () 
   }
 })
 
-test("the repo's writes are scoped by the environment", async () => {
+test("the repo's writes are scoped by the project", async () => {
   const result = await run(
     Effect.gen(function*() {
       const tasks = yield* Tasks
       const repo = yield* TasksRepo
       const task = yield* tasks.create(other, member, { title: "Elsewhere" }, from)
       const id = TaskId.make(task.id)
-      const updated = yield* repo.updateInEnvironment({ ...task, environment_id: environment, title: "Moved" })
-      const deleted = yield* repo.deleteInEnvironment(environment, id)
-      const after = yield* repo.findInEnvironment(other, id)
+      const updated = yield* repo.updateInProject({ ...task, project_id: project, title: "Moved" })
+      const deleted = yield* repo.deleteInProject(project, id)
+      const after = yield* repo.findInProject(other, id)
       return { updated, deleted, title: after?.title }
     })
   )

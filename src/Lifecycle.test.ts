@@ -121,11 +121,11 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
   ) => Effect.runPromise(Effect.provide(effect, context))
   const c = await exec(consumer(identity.url, retry).pipe(Effect.provide(context)))
 
-  const addTask = (id: string, environmentId: string) =>
+  const addTask = (id: string, projectId: string) =>
     exec(Effect.flatMap(TasksRepo, (tasks) =>
       tasks.insert(Task.insert.make({
         id: TaskId.make(id),
-        environment_id: environmentId,
+        project_id: projectId,
         title: "t",
         status: "todo",
         assignee_id: null,
@@ -133,9 +133,9 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
         created_at: "now",
         updated_at: "now"
       }))))
-  const count = (environmentId: string) =>
+  const count = (projectId: string) =>
     exec(Effect.flatMap(TasksRepo, (tasks) =>
-      tasks.listByEnvironment(environmentId, { limit: 100, startingAfter: "" }).pipe(
+      tasks.listByProject(projectId, { limit: 100, startingAfter: "" }).pipe(
         Effect.map((page) => page.items.length)
       )))
   const addProfile = (userId: string) =>
@@ -211,13 +211,13 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
 
 const theLog = () =>
   serveIdentity([
-    { id: "7", type: "node.created", kind: "environment", node_id: purged },
+    { id: "7", type: "node.created", kind: "project", node_id: purged },
     { id: "8", type: "user.created", user_id: fresh },
     { id: "9", type: "node.purged", kind: "organization", node_id: kept },
     { id: "10", type: "member.removed" },
-    { id: "12", type: "node.purged", kind: "environment", node_id: purged },
+    { id: "12", type: "node.purged", kind: "project", node_id: purged },
     { id: "13", type: "user.deleted", user_id: gone },
-    { id: "20", type: "node.deleted", kind: "environment", node_id: kept }
+    { id: "20", type: "node.deleted", kind: "project", node_id: kept }
   ])
 
 test("acts on each page and advances the cursor", async () => {

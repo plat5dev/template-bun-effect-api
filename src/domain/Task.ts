@@ -12,7 +12,7 @@ export type TaskStatus = typeof TaskStatus.Type
 // the same tree, or null.
 export class Task extends Model.Class<Task>("Task")({
   id: Model.GeneratedByApp(TaskId),
-  environment_id: Model.GeneratedByApp(Schema.String),
+  project_id: Model.GeneratedByApp(Schema.String),
   // Checked by the service (trimmed, 1 to 255 characters), not here: a schema's maxLength
   // counts UTF-16 units, not characters.
   title: Schema.String,

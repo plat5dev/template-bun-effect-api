@@ -3,7 +3,7 @@ import { Effect, Layer } from "effect"
 import { Api } from "../Api.js"
 import { readBody } from "../plat5/Body.js"
 import { invalidRequest } from "../plat5/Errors.js"
-import { MEMBER_HEADER, PROJECT_HEADER, RequireMember } from "./Api.js"
+import { MEMBER_HEADER, RequireMember } from "./Api.js"
 import { type FrontDoor, TASK_FIELDS, Tasks } from "./Service.js"
 
 const RequireMemberLive = Layer.succeed(
@@ -16,11 +16,7 @@ const RequireMemberLive = Layer.succeed(
   })
 )
 
-const frontDoor = (
-  headers: { readonly [PROJECT_HEADER]?: string | undefined },
-  request: HttpServerRequest.HttpServerRequest
-): FrontDoor => ({
-  projectId: headers[PROJECT_HEADER],
+const frontDoor = (request: HttpServerRequest.HttpServerRequest): FrontDoor => ({
   requestId: request.headers["x-request-id"] ?? ""
 })
 
@@ -32,22 +28,22 @@ export const HttpTasksLive = HttpApiBuilder.group(Api, "tasks", (handlers) =>
 
     return handlers
       .handle("list", ({ path, urlParams }) =>
-        tasks.list(path.environment_id, urlParams).pipe(
+        tasks.list(path.project_id, urlParams).pipe(
           Effect.map(({ hasMore, items }) => ({ tasks: items, has_more: hasMore }))
         ))
       .handleRaw("create", ({ headers, path, request }) =>
         readBody(TASK_FIELDS).pipe(
           Effect.flatMap((fields) =>
-            tasks.create(path.environment_id, headers[MEMBER_HEADER], fields, frontDoor(headers, request))
+            tasks.create(path.project_id, headers[MEMBER_HEADER], fields, frontDoor(request))
           )
         ))
-      .handle("get", ({ path }) => tasks.getInEnvironment(path.environment_id, path.task_id))
-      .handleRaw("update", ({ headers, path, request }) =>
+      .handle("get", ({ path }) => tasks.getInProject(path.project_id, path.task_id))
+      .handleRaw("update", ({ path, request }) =>
         readBody(TASK_FIELDS).pipe(
           Effect.flatMap((fields) =>
-            tasks.update(path.environment_id, path.task_id, fields, frontDoor(headers, request))
+            tasks.update(path.project_id, path.task_id, fields, frontDoor(request))
           )
         ))
-      .handle("remove", ({ path }) => tasks.remove(path.environment_id, path.task_id))
+      .handle("remove", ({ path }) => tasks.remove(path.project_id, path.task_id))
   })
 ).pipe(Layer.provide(Tasks.Default), Layer.provide(RequireMemberLive))

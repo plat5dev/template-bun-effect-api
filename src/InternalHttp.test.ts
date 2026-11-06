@@ -60,12 +60,12 @@ test("the internal port answers anything else with the 404 envelope", async () =
 
 test("metrics: names, help, and labels as the other starters have them", async () => {
   const { base, internal } = await serve()
-  await fetch(`${base}/environments/01jd8x3k7q0000000000000000/tasks`)
+  await fetch(`${base}/projects/01jd8x3k7q0000000000000000/tasks`)
   await fetch(`${base}/nope`)
   const text = await (await internal("/metrics")).text()
   expect(text).toContain("# HELP http_requests_total Total HTTP requests handled by the api service")
   expect(text).toContain("# HELP http_request_duration_seconds HTTP request latency observed by the api service")
-  expect(text).toMatch(/http_requests_total\{[^}]*route="\/environments\/:environment_id\/tasks"/)
+  expect(text).toMatch(/http_requests_total\{[^}]*route="\/projects\/:project_id\/tasks"/)
   expect(text).toMatch(/http_requests_total\{[^}]*route="unknown"/)
   expect(text).toMatch(/db_operations_total\{[^}]*db_operation_name="tasks\.list"[^}]*\}/)
   expect(text).toMatch(/db_operations_total\{[^}]*db_namespace="api"/)

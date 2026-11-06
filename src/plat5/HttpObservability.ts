@@ -108,9 +108,9 @@ const recordHttpMetrics = (
 
 /**
  * The ids the front door gave this request (plat5 docs/reference/telemetry.md): the user on
- * a user route, the environment node and the caller's member on an environment route. Log
+ * a user route, the project node and the caller's member on a project route. Log
  * fields use them as named; span attributes add the `plat5.` prefix. The ids are the
- * matched route's `user_id` and `environment_id` params.
+ * matched route's `user_id` and `project_id` params.
  */
 const callerIds = (
   params: Record<string, string>,
@@ -118,7 +118,7 @@ const callerIds = (
 ): ReadonlyArray<readonly [field: string, value: string]> => {
   const ids: Array<readonly [string, string]> = []
   if (params.user_id) ids.push(["user_id", params.user_id])
-  if (params.environment_id) ids.push(["node_id", params.environment_id])
+  if (params.project_id) ids.push(["node_id", params.project_id])
   const memberId = Option.getOrUndefined(Headers.get(headers, "x-plat5-member-id"))
   if (memberId) ids.push(["member_id", memberId])
   return ids

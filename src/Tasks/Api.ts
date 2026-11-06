@@ -11,16 +11,10 @@ import {
 import { ListParams } from "../plat5/Pagination.js"
 
 /**
- * The caller's member id in the environment's tree, from the front door. A create records
- * it as the task's author, and answers 400 without it.
+ * The caller's member id in the project's tree, from the front door. A create records it as
+ * the task's author, and answers 400 without it.
  */
 export const MEMBER_HEADER = "x-plat5-member-id"
-
-/**
- * The environment's project id, from the front door. A write that sets an assignee checks
- * them on it, and answers 400 without it.
- */
-export const PROJECT_HEADER = "x-plat5-project-id"
 
 // The bodies, for the OpenAPI document. The handlers read them (src/plat5/Body.ts) and the
 // service checks them, so their answers are the API's own: a body not sent as JSON, or a
@@ -30,7 +24,7 @@ export const PROJECT_HEADER = "x-plat5-project-id"
 const MemberId = Schema.String.pipe(Schema.pattern(/^[0-7][0-9a-hjkmnp-tv-z]{25}$/))
 
 const AssigneeId = Schema.NullOr(MemberId).annotations({
-  description: "A member id in the environment's tree who can see its project, or null for none."
+  description: "A member id in the project's tree who can see the project, or null for none."
 })
 
 const Title = Schema.String.annotations({
@@ -50,15 +44,10 @@ const TaskUpdate = Schema.Struct({
   assignee_id: Schema.optional(AssigneeId)
 })
 
-// RequireMember has checked the member id by the time these are read: without it a create
-// is our 400. The project id is optional, so a write without an assignee doesn't need it.
+// RequireMember has checked the member id by the time it's read: without it a create is
+// our 400.
 const CreateHeaders = Schema.Struct({
-  [MEMBER_HEADER]: Schema.String,
-  [PROJECT_HEADER]: Schema.optional(Schema.String)
-})
-
-const UpdateHeaders = Schema.Struct({
-  [PROJECT_HEADER]: Schema.optional(Schema.String)
+  [MEMBER_HEADER]: Schema.String
 })
 
 /**
@@ -69,19 +58,19 @@ export class RequireMember extends HttpApiMiddleware.Tag<RequireMember>()("Tasks
   failure: InvalidRequest
 }) {}
 
-const EnvironmentPath = Schema.Struct({
-  environment_id: Schema.String
+const ProjectPath = Schema.Struct({
+  project_id: Schema.String
 })
 
 const TaskPath = Schema.Struct({
-  environment_id: Schema.String,
+  project_id: Schema.String,
   task_id: Schema.String
 })
 
 export class TasksApi extends HttpApiGroup.make("tasks")
   .add(
     HttpApiEndpoint.get("list", "/")
-      .setPath(EnvironmentPath)
+      .setPath(ProjectPath)
       .setUrlParams(ListParams)
       .addSuccess(Schema.Struct({ tasks: Schema.Array(Task.json), has_more: Schema.Boolean }))
       .addError(InternalError)
@@ -89,7 +78,7 @@ export class TasksApi extends HttpApiGroup.make("tasks")
   )
   .add(
     HttpApiEndpoint.post("create", "/")
-      .setPath(EnvironmentPath)
+      .setPath(ProjectPath)
       .setHeaders(CreateHeaders)
       .setPayload(TaskCreate)
       .middleware(RequireMember)
@@ -109,10 +98,8 @@ export class TasksApi extends HttpApiGroup.make("tasks")
   .add(
     HttpApiEndpoint.patch("update", "/:task_id")
       .setPath(TaskPath)
-      .setHeaders(UpdateHeaders)
       .setPayload(TaskUpdate)
       .addSuccess(Task.json)
-      .addError(InvalidRequest)
       .addError(NotFound)
       .addError(InternalError)
       .addError(ValidationFailed)
@@ -125,8 +112,8 @@ export class TasksApi extends HttpApiGroup.make("tasks")
       .addError(NotFound)
       .addError(InternalError)
   )
-  // An environment is a Plat5 node: its id is in the path, from the front door.
-  .prefix("/environments/:environment_id/tasks")
+  // A project is a Plat5 node: its id is in the path, from the front door.
+  .prefix("/projects/:project_id/tasks")
   .annotate(OpenApi.Title, "Tasks")
-  .annotate(OpenApi.Description, "Tasks inside an environment")
+  .annotate(OpenApi.Description, "Tasks inside a project")
 {}

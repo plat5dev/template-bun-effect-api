@@ -6,18 +6,17 @@ import { Api } from "../Api.js"
 import { PublicApiLive } from "../Http.js"
 import { CREATED_HEADER, DETAILS_HEADER } from "../plat5/Audit.js"
 import { TelemetryLive } from "../Telemetry.js"
-import { MEMBER_HEADER, PROJECT_HEADER } from "./Api.js"
+import { MEMBER_HEADER } from "./Api.js"
 
-const environment = "01jd8x3k7q0000000000000000"
+const project = "01jd8x3k7q0000000000000000"
 const other = "01jd8x3k7q0000000000000001"
-const project = "01jd8x3k7q00000000000000pp"
 const member = "01jd8x3k7q00000000000000mm"
 const assignee = "01jd8x3k7q00000000000000aa"
 const user = "01jd8x3k7q00000000000000u1"
 // Not the starter's, to show the check asks for the configured one.
 const permission = "tasks:assignable"
 
-const tasksPath = `/environments/${environment}/tasks`
+const tasksPath = `/projects/${project}/tasks`
 /** A write that sets the assignee. */
 const assigning = JSON.stringify({ title: "Other", assignee_id: assignee })
 
@@ -30,7 +29,7 @@ const evaluation = (assigneeId: string) => ({
 
 type Task = {
   id: string
-  environment_id: string
+  project_id: string
   title: string
   status: string
   assignee_id: string | null
@@ -113,8 +112,8 @@ const newApp = async (opts: { identityUnset?: boolean; tracesExported?: boolean 
   const base = `http://127.0.0.1:${address._tag === "TcpAddress" ? address.port : 0}`
 
   /**
-   * Sends what the gateway sends on an environment route: the caller's member id and the
-   * environment's project id, but for the header in `without`.
+   * Sends what the gateway sends on a project route: the caller's member id, but for the
+   * header in `without`.
    */
   const send = (
     method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT" | "OPTIONS" | "HEAD",
@@ -124,7 +123,6 @@ const newApp = async (opts: { identityUnset?: boolean; tracesExported?: boolean 
   ) => {
     const headers: Record<string, string> = {
       [MEMBER_HEADER]: member,
-      [PROJECT_HEADER]: project,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...opts.headers
     }
@@ -132,8 +130,8 @@ const newApp = async (opts: { identityUnset?: boolean; tracesExported?: boolean 
     return fetch(`${base}${path}`, { method, headers, body })
   }
 
-  const create = async (environmentId: string, title: string): Promise<Task> => {
-    const res = await send("POST", `/environments/${environmentId}/tasks`, JSON.stringify({ title }))
+  const create = async (projectId: string, title: string): Promise<Task> => {
+    const res = await send("POST", `/projects/${projectId}/tasks`, JSON.stringify({ title }))
     expect(res.status).toBe(201)
     return (await res.json()) as Task
   }
@@ -166,8 +164,8 @@ const errorOf = async (res: Response) => ((await res.json()) as ErrorBody).error
 
 test("create", async () => {
   const { create } = await newApp()
-  const task = await create(environment, "Launch")
-  expect(task.environment_id).toBe(environment)
+  const task = await create(project, "Launch")
+  expect(task.project_id).toBe(project)
   expect(task.created_by).toBe(member)
   expect(task.status).toBe("todo")
   expect(task.assignee_id).toBeNull()
@@ -183,7 +181,7 @@ test("create needs the member, before the body", async () => {
   }
 })
 
-test("scoped by environment", async () => {
+test("scoped by project", async () => {
   const { send, create, list } = await newApp()
   const task = await create(other, "Elsewhere")
   for (const method of ["GET", "PATCH", "DELETE"] as const) {
@@ -197,7 +195,7 @@ test("scoped by environment", async () => {
 test("list pages", async () => {
   const { create, list } = await newApp()
   const ids: string[] = []
-  for (const title of ["a", "b", "c"]) ids.push((await create(environment, title)).id)
+  for (const title of ["a", "b", "c"]) ids.push((await create(project, title)).id)
 
   const first = await list("?limit=2")
   expect(first.tasks.map((task) => task.id)).toEqual(ids.slice(0, 2))
@@ -212,7 +210,7 @@ test("tasks made in the same millisecond list in the order they were made", asyn
   setSystemTime(new Date("2026-10-28T00:00:00.000Z"))
   const ids: string[] = []
   try {
-    for (let i = 0; i < 10; i++) ids.push((await create(environment, `t${i}`)).id)
+    for (let i = 0; i < 10; i++) ids.push((await create(project, `t${i}`)).id)
   } finally {
     setSystemTime()
   }
@@ -256,7 +254,7 @@ test("create with an assignee", async () => {
   const task = (await res.json()) as Task
   expect(task.assignee_id).toBe(assignee)
   expect((await get(task.id)).assignee_id).toBe(assignee)
-  // The assignee, on the project from the header, for the configured permission.
+  // The assignee, on the project from the path, for the configured permission.
   expect(identity.asked).toEqual([evaluation(assignee)])
 })
 
@@ -281,7 +279,7 @@ for (const tracesExported of [false, true]) {
 
 test("a refused assignee is a 422, and nothing is written", async () => {
   const { identity, send, create, list } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   identity.body = `{"decision":false}`
 
   const want = "That person can't see this project."
@@ -307,7 +305,7 @@ for (const [name, status, answer, identityUnset] of [
 ] as const) {
   test(`no answer is a 503, and nothing is written: ${name}`, async () => {
     const { identity, send, create, list, logged } = await newApp({ identityUnset })
-    const task = await create(environment, "Launch")
+    const task = await create(project, "Launch")
     identity.status = status
     identity.body = answer
 
@@ -328,7 +326,7 @@ for (const [name, status, answer, identityUnset] of [
 
 test("update an assignee", async () => {
   const { identity, send, create, get } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   const path = `${tasksPath}/${task.id}`
 
   let res = await send("PATCH", path, JSON.stringify({ assignee_id: assignee }))
@@ -354,36 +352,22 @@ test("update an assignee", async () => {
 
 test("no assignee, no check", async () => {
   const { identity, send, list } = await newApp()
-  // Without an assignee, the project header isn't needed either.
   for (const body of [`{"title":"a"}`, `{"title":"b","assignee_id":null}`]) {
-    const res = await send("POST", tasksPath, body, { without: PROJECT_HEADER })
+    const res = await send("POST", tasksPath, body)
     expect(res.status).toBe(201)
     expect(((await res.json()) as Task).assignee_id).toBeNull()
   }
   const task = (await list()).tasks[0]!
   for (const body of [`{"status":"done"}`, `{"assignee_id":null}`]) {
-    const res = await send("PATCH", `${tasksPath}/${task.id}`, body, { without: PROJECT_HEADER })
+    const res = await send("PATCH", `${tasksPath}/${task.id}`, body)
     expect(res.status).toBe(200)
   }
   expect(identity.asked).toEqual([])
 })
 
-test("an assignee needs the project", async () => {
-  const { identity, send, create, list } = await newApp()
-  const task = await create(environment, "Launch")
-  for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
-    const res = await send(method, path, assigning, { without: PROJECT_HEADER })
-    expect(res.status).toBe(400)
-    expect((await errorOf(res)).code).toBe("INVALID_REQUEST")
-  }
-  const { tasks } = await list()
-  expect(tasks.map((t) => t.title)).toEqual(["Launch"])
-  expect(identity.asked).toEqual([])
-})
-
 test("a bad assignee id is a 422 at assignee_id", async () => {
   const { identity, send, create } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   for (const value of [`""`, `"someone"`, `"01JD8X3K7Q00000000000000AA"`, `5`, `{}`]) {
     for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
       const res = await send(method, path, `{"title":"Other","assignee_id":${value}}`)
@@ -405,8 +389,6 @@ test("update order: the body, then the task, then identity", async () => {
   expect(res.status).toBe(422)
   res = await send("PATCH", missing, assign)
   expect(res.status).toBe(404)
-  res = await send("PATCH", missing, assign, { without: PROJECT_HEADER })
-  expect(res.status).toBe(404)
   expect(identity.asked).toEqual([])
 })
 
@@ -416,7 +398,7 @@ test("request logs carry the ids the front door gave", async () => {
   await send("GET", `/users/${user}/profile`)
   const lines = logged().filter((line) => line.message === "request completed")
   expect(lines.map((line) => [line.node_id, line.member_id, line.user_id])).toEqual([
-    [environment, member, undefined],
+    [project, member, undefined],
     [undefined, member, user]
   ])
 })
@@ -425,8 +407,8 @@ test("the OpenAPI document has the assignee and the answers", () => {
   const spec = OpenApi.fromApi(Api)
   const task = spec.components.schemas["Task.json"] as { required: string[] }
   expect(task.required).toContain("assignee_id")
-  const tasks = spec.paths["/environments/{environment_id}/tasks"]!
-  const one = spec.paths["/environments/{environment_id}/tasks/{task_id}"]!
+  const tasks = spec.paths["/projects/{project_id}/tasks"]!
+  const one = spec.paths["/projects/{project_id}/tasks/{task_id}"]!
   for (const op of [tasks.post!, one.patch!]) {
     const body = op.requestBody?.content["application/json"]?.schema as {
       properties: Record<string, { anyOf: { type: string }[] }>
@@ -456,7 +438,7 @@ const sending = (contentType: string | undefined) =>
 
 test("title and status errors, word for word", async () => {
   const { send, create } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
     for (const title of ["", "   ", "\u3000\u0085"]) {
       await expectField(await send(method, path, JSON.stringify({ title })), "title", "Title is required.")
@@ -481,7 +463,7 @@ test("titles are trimmed of Unicode white space, as Go's strings.TrimSpace", asy
   // U+FEFF isn't white space to Go. (Not at the start: bun:sqlite drops a leading one.)
   res = await send("POST", tasksPath, JSON.stringify({ title: "Launch\ufeff" }))
   expect(((await res.json()) as Task).title).toBe("Launch\ufeff")
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   res = await send("PATCH", `${tasksPath}/${task.id}`, JSON.stringify({ title: "  Renamed  " }))
   expect(res.status).toBe(200)
   expect(((await res.json()) as Task).title).toBe("Renamed")
@@ -508,7 +490,7 @@ test("a title's limit counts characters, not UTF-16 units", async () => {
 
 test("PATCH: null leaves a field as it is, and a no-op still answers the task", async () => {
   const { send, create } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   for (const body of [`{"title":null,"status":null}`, `{}`, `null`]) {
     const res = await send("PATCH", `${tasksPath}/${task.id}`, body)
     expect(res.status).toBe(200)
@@ -527,7 +509,7 @@ test("DELETE never reads its body", async () => {
     ["not a type", "{}"],
     [undefined, "x"]
   ] as const) {
-    const task = await create(environment, "Launch")
+    const task = await create(project, "Launch")
     const res = await send("DELETE", `${tasksPath}/${task.id}`, body, sending(contentType))
     expect(res.status).toBe(204)
   }
@@ -535,7 +517,7 @@ test("DELETE never reads its body", async () => {
 
 test("a known path in another method, or OPTIONS, is the unknown route's 404", async () => {
   const { send, create } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   const taskPath = `${tasksPath}/${task.id}`
   for (const [method, path] of [
     ["PUT", taskPath],
@@ -573,7 +555,7 @@ test("a known path in another method, or OPTIONS, is the unknown route's 404", a
 
 test("a body not sent as JSON is a 422 at body, and nothing is written", async () => {
   const { send, create, list } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   for (const [contentType, body] of [
     [undefined, `{"title":"Other"}`],
     [undefined, ""],
@@ -608,7 +590,7 @@ test("JSON is application/json with any parameters, or application/…+json", as
 
 test("a body that isn't a JSON object is a 422 at body", async () => {
   const { send, create } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   for (const body of ["", " ", "{", `{"title":"a"} x`, `[{"title":"a"}]`, `"a"`, "5", "true"]) {
     for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
       await expectField(await send(method, path, body), "body", FALLBACK)
@@ -618,7 +600,7 @@ test("a body that isn't a JSON object is a 422 at body", async () => {
 
 test("a field of the wrong JSON type is a 422 at body, never coerced", async () => {
   const { send, create } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   for (const body of [
     `{"title":123}`,
     `{"title":true}`,
@@ -635,7 +617,7 @@ test("a field of the wrong JSON type is a 422 at body, never coerced", async () 
 
 test("keys match exactly: an unknown field is a 422 naming each, before anything else", async () => {
   const { send, create, get, list, identity } = await newApp()
-  const task = await create(environment, "Launch")
+  const task = await create(project, "Launch")
   for (
     const [method, url, body, paths] of [
       ["POST", tasksPath, `{"Title":"x"}`, ["Title"]],
@@ -696,7 +678,7 @@ test("a body over 1 MiB is a 413 before anything else, on any route", async () =
 
 test("list parameters, as Go reads them", async () => {
   const { send, create } = await newApp()
-  for (const title of ["a", "b"]) await create(environment, title)
+  for (const title of ["a", "b"]) await create(project, title)
   const count = async (query: string) => {
     const res = await send("GET", `${tasksPath}${query}`)
     expect(res.status).toBe(200)
@@ -744,7 +726,7 @@ test("times are RFC 3339 UTC without trailing zeros, as Go's RFC3339Nano", async
   const { create } = await newApp()
   setSystemTime(new Date("2026-10-28T00:00:00.100Z"))
   try {
-    const task = (await create(environment, "Launch")) as Task & { created_at: string; updated_at: string }
+    const task = (await create(project, "Launch")) as Task & { created_at: string; updated_at: string }
     expect(task.created_at).toBe("2026-10-28T00:00:00.1Z")
     expect(task.updated_at).toBe(task.created_at)
   } finally {
@@ -759,11 +741,11 @@ test("the request log: the route's template or unknown, warn on a 4xx", async ()
   await send("GET", "/nope/01jd8x3k7q00000000000000zz")
   await send("PATCH", `/users/${user}/profile`, "{}")
   const [ok, missing, unknown, wrongMethod] = logged().filter((line) => line.message === "request completed")
-  expect(ok!.route).toBe("/environments/:environment_id/tasks")
+  expect(ok!.route).toBe("/projects/:project_id/tasks")
   expect(ok!.level).toBe("info")
   expect("request_id" in ok!).toBe(false)
-  expect([ok!.node_id, ok!.member_id]).toEqual([environment, member])
-  expect(missing!.route).toBe("/environments/:environment_id/tasks/:task_id")
+  expect([ok!.node_id, ok!.member_id]).toEqual([project, member])
+  expect(missing!.route).toBe("/projects/:project_id/tasks/:task_id")
   expect(missing!.level).toBe("warn")
   expect(missing!.request_id).toBe("req-2")
   expect([unknown!.route, unknown!.level]).toEqual(["unknown", "warn"])

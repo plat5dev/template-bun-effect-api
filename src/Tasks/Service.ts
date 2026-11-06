@@ -6,7 +6,7 @@ import { Task, TaskId, type TaskStatus } from "../domain/Task.js"
 import * as Audit from "../plat5/Audit.js"
 import { charLength, type Fields, isLowercaseUlid, optionalString, trimSpace } from "../plat5/Body.js"
 import { now } from "../plat5/Clock.js"
-import { fieldError, invalidRequest, notFound, serviceUnavailable } from "../plat5/Errors.js"
+import { fieldError, notFound, serviceUnavailable } from "../plat5/Errors.js"
 import { type ListParams, parsePage } from "../plat5/Pagination.js"
 import { TasksRepo } from "./Repo.js"
 
@@ -46,19 +46,17 @@ const checkAssigneeId = (value: unknown) =>
     : Effect.fail(fieldError("assignee_id"))
 
 /**
- * What checking an assignee needs from the front door: the environment's project id, from
- * `X-Plat5-Project-Id`, and the request's `X-Request-ID` ("" without one).
+ * What checking an assignee needs from the front door: the request's `X-Request-ID` (""
+ * without one).
  */
 export type FrontDoor = {
-  readonly projectId: string | undefined
   readonly requestId: string
 }
 
-// Every call scopes its reads and writes by the environment id in the path, and checks
-// nothing about the caller or the environment: the front door decided who may call, on
-// which environment. A write checks its body first (each field's type, then title, status
-// and assignee_id), then on an update the task, then the assignee: the project id, then
-// identity's answer, before writing.
+// Every call scopes its reads and writes by the project id in the path, and checks nothing
+// about the caller or the project: the front door decided who may call, on which project.
+// A write checks its body first (each field's type, then title, status and assignee_id),
+// then on an update the task, then the assignee, by identity's answer, before writing.
 export class Tasks extends Effect.Service<Tasks>()("Tasks", {
   effect: Effect.gen(function*() {
     const repo = yield* TasksRepo
@@ -66,21 +64,18 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
     const config = yield* AppConfig
 
     /**
-     * Asks identity whether the assignee holds `TASK_ASSIGNEE_PERMISSION` on the
-     * environment's project. The caller may assign, but the assignee isn't the caller, so
-     * the front door decided nothing about them
+     * Asks identity whether the assignee holds `TASK_ASSIGNEE_PERMISSION` on the project.
+     * The caller may assign, but the assignee isn't the caller, so the front door decided
+     * nothing about them
      * (plat5 docs/guides/write-a-service.md#checking-access-outside-a-request). No answer
      * is no: a 503, so nothing is written.
      */
-    const checkAssignee = (assigneeId: string, from: FrontDoor) =>
+    const checkAssignee = (projectId: string, assigneeId: string, from: FrontDoor) =>
       Effect.gen(function*() {
-        if (!from.projectId) {
-          return yield* Effect.fail(invalidRequest())
-        }
         const allowed = yield* access.evaluate({
           memberId: assigneeId,
           kind: "project",
-          nodeId: from.projectId,
+          nodeId: projectId,
           permission: config.taskAssigneePermission
         }, from.requestId).pipe(Effect.mapError(() => serviceUnavailable()))
         if (!allowed) {
@@ -88,14 +83,14 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         }
       })
 
-    const list = (environmentId: string, params: ListParams) =>
+    const list = (projectId: string, params: ListParams) =>
       parsePage(params).pipe(
-        Effect.flatMap((page) => repo.listByEnvironment(environmentId, page)),
-        Effect.withSpan("Tasks.list", { attributes: { "plat5.node_id": environmentId } })
+        Effect.flatMap((page) => repo.listByProject(projectId, page)),
+        Effect.withSpan("Tasks.list", { attributes: { "plat5.node_id": projectId } })
       )
 
     /** Records `memberId`, the caller's, as the author. */
-    const create = (environmentId: string, memberId: string, fields: Fields, from: FrontDoor) =>
+    const create = (projectId: string, memberId: string, fields: Fields, from: FrontDoor) =>
       Effect.gen(function*() {
         const rawTitle = yield* optionalString(fields, "title")
         const rawStatus = yield* optionalString(fields, "status")
@@ -103,13 +98,13 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         const status = rawStatus === undefined ? "todo" : yield* checkStatus(rawStatus)
         const assigneeId = (yield* checkAssigneeId(fields.assignee_id)) ?? null
         if (assigneeId !== null) {
-          yield* checkAssignee(assigneeId, from)
+          yield* checkAssignee(projectId, assigneeId, from)
         }
         const ts = now()
         const task = yield* repo.insert(
           Task.insert.make({
             id: TaskId.make(ulid().toLowerCase()),
-            environment_id: environmentId,
+            project_id: projectId,
             title,
             status,
             assignee_id: assigneeId,
@@ -127,20 +122,20 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         yield* Audit.setCreated(task.id)
         return task
       }).pipe(
-        Effect.withSpan("Tasks.create", { attributes: { "plat5.node_id": environmentId } })
+        Effect.withSpan("Tasks.create", { attributes: { "plat5.node_id": projectId } })
       )
 
-    /** The task, or a 404 when there is none by that id in the environment. */
-    const getInEnvironment = (environmentId: string, taskId: string) =>
+    /** The task, or a 404 when there is none by that id in the project. */
+    const getInProject = (projectId: string, taskId: string) =>
       Effect.gen(function*() {
-        const task = yield* repo.findInEnvironment(environmentId, TaskId.make(taskId))
+        const task = yield* repo.findInProject(projectId, TaskId.make(taskId))
         if (task === undefined) {
           return yield* Effect.fail(notFound("task", taskId))
         }
         return task
       }).pipe(
-        Effect.withSpan("Tasks.getInEnvironment", {
-          attributes: { "plat5.node_id": environmentId, task_id: taskId }
+        Effect.withSpan("Tasks.getInProject", {
+          attributes: { "plat5.node_id": projectId, task_id: taskId }
         })
       )
 
@@ -148,19 +143,19 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
      * A field absent or null leaves the task's as it is, but for `assignee_id`: null
      * unassigns. `updated_at` moves on every update, even one that changes nothing.
      */
-    const update = (environmentId: string, taskId: string, fields: Fields, from: FrontDoor) =>
+    const update = (projectId: string, taskId: string, fields: Fields, from: FrontDoor) =>
       Effect.gen(function*() {
         const rawTitle = yield* optionalString(fields, "title")
         const rawStatus = yield* optionalString(fields, "status")
         const title = rawTitle === undefined ? undefined : yield* checkTitle(rawTitle)
         const status = rawStatus === undefined ? undefined : yield* checkStatus(rawStatus)
         const assigneeId = yield* checkAssigneeId(fields.assignee_id)
-        const task = yield* getInEnvironment(environmentId, taskId)
+        const task = yield* getInProject(projectId, taskId)
         // Absent and null have nothing to check.
         if (typeof assigneeId === "string") {
-          yield* checkAssignee(assigneeId, from)
+          yield* checkAssignee(projectId, assigneeId, from)
         }
-        const updated = yield* repo.updateInEnvironment(Task.make({
+        const updated = yield* repo.updateInProject(Task.make({
           ...task,
           title: title ?? task.title,
           status: status ?? task.status,
@@ -179,14 +174,14 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         return updated
       }).pipe(
         Effect.withSpan("Tasks.update", {
-          attributes: { "plat5.node_id": environmentId, task_id: taskId }
+          attributes: { "plat5.node_id": projectId, task_id: taskId }
         })
       )
 
-    const remove = (environmentId: string, taskId: string) =>
+    const remove = (projectId: string, taskId: string) =>
       Effect.gen(function*() {
-        yield* getInEnvironment(environmentId, taskId)
-        const deleted = yield* repo.deleteInEnvironment(environmentId, TaskId.make(taskId))
+        yield* getInProject(projectId, taskId)
+        const deleted = yield* repo.deleteInProject(projectId, TaskId.make(taskId))
         // Deleted since it was read.
         if (!deleted) {
           return yield* Effect.fail(notFound("task", taskId))
@@ -194,11 +189,11 @@ export class Tasks extends Effect.Service<Tasks>()("Tasks", {
         // No audit details: the route and the task id in its path say what happened.
       }).pipe(
         Effect.withSpan("Tasks.remove", {
-          attributes: { "plat5.node_id": environmentId, task_id: taskId }
+          attributes: { "plat5.node_id": projectId, task_id: taskId }
         })
       )
 
-    return { list, create, getInEnvironment, update, remove } as const
+    return { list, create, getInProject, update, remove } as const
   }),
   dependencies: [TasksRepo.Default, Access.Default, AppConfig.Live]
 }) {}
