@@ -1,4 +1,5 @@
 import { Config, ConfigError, Context, Effect, Layer } from "effect"
+import { VERSION } from "./Version.js"
 
 const optionalNonEmpty = (name: string) =>
   Config.option(Config.string(name)).pipe(
@@ -19,7 +20,6 @@ const TELEMETRY_VARIABLES = [
   "OTEL_SERVICE_NAME",
   "OTEL_SERVICE_NAMESPACE",
   "OTEL_SERVICE_VERSION",
-  "CI_COMMIT_TAG",
   "OTEL_SERVICE_INSTANCE_ID",
   "HOSTNAME",
   "OTEL_DEPLOYMENT_ENV",
@@ -38,7 +38,7 @@ const TELEMETRY_VARIABLES = [
   "OTEL_METRIC_EXPORT_INTERVAL"
 ] as const
 
-type TelemetryEnv = Record<(typeof TELEMETRY_VARIABLES)[number], string | undefined>
+export type TelemetryEnv = Record<(typeof TELEMETRY_VARIABLES)[number], string | undefined>
 
 /**
  * A comma-separated OTEL_*_EXPORTER value, lowercased: undefined when unset or empty (the
@@ -67,26 +67,61 @@ const exporterList = (
  * `=` or a key is an error.
  */
 const parseResourceAttributes = (raw: string | undefined): Record<string, string> => {
-  if (!raw) return {}
+  if (raw === undefined) return {}
   const out: Record<string, string> = {}
   for (const entry of raw.split(",")) {
-    const trimmed = entry.trim()
-    if (!trimmed) continue
-    const eq = trimmed.indexOf("=")
-    const key = eq > 0 ? trimmed.slice(0, eq).trim() : ""
-    if (!key) throw new Error(`OTEL_RESOURCE_ATTRIBUTES: "${trimmed}" isn't key=value`)
+    const eq = entry.indexOf("=")
+    const key = eq >= 0 ? entry.slice(0, eq).trim() : ""
+    if (!key) throw new Error(`OTEL_RESOURCE_ATTRIBUTES is "${raw}": want key=value entries, comma-separated`)
     try {
-      out[key] = decodeURIComponent(trimmed.slice(eq + 1).trim())
+      out[key] = decodeURIComponent(entry.slice(eq + 1).trim())
     } catch {
-      throw new Error(`OTEL_RESOURCE_ATTRIBUTES: "${trimmed}" isn't percent-encoded`)
+      throw new Error(`OTEL_RESOURCE_ATTRIBUTES is "${raw}": want percent-encoded values`)
     }
   }
   return out
 }
 
 /**
+ * The resource (plat5 docs/reference/telemetry.md#resource-identity), layered: the
+ * service's defaults (the build's `version` among them), then OTEL_RESOURCE_ATTRIBUTES and
+ * OTEL_SERVICE_NAME, then the convenience variables that are set.
+ */
+export const serviceResource = (env: TelemetryEnv, version: string): Record<string, string> => {
+  const resource: Record<string, string> = {
+    "service.name": "api",
+    "service.namespace": "api",
+    "service.instance.id": env.HOSTNAME ?? "api-local",
+    "service.version": version,
+    "deployment.environment": "development",
+    ...parseResourceAttributes(env.OTEL_RESOURCE_ATTRIBUTES)
+  }
+  if (env.OTEL_SERVICE_NAME !== undefined) resource["service.name"] = env.OTEL_SERVICE_NAME
+  const convenience = [
+    ["service.namespace", env.OTEL_SERVICE_NAMESPACE],
+    ["service.version", env.OTEL_SERVICE_VERSION],
+    ["service.instance.id", env.OTEL_SERVICE_INSTANCE_ID],
+    ["deployment.environment", env.OTEL_DEPLOYMENT_ENV ?? env.DEPLOYMENT_ENV]
+  ] as const
+  for (const [key, value] of convenience) {
+    if (value !== undefined) resource[key] = value
+  }
+  return resource
+}
+
+/** An OTLP endpoint variable: undefined when unset, else an http:// or https:// URL. */
+const endpoint = (name: string, raw: string | undefined): URL | undefined => {
+  if (raw === undefined) return undefined
+  const url = URL.parse(raw)
+  if (url === null || (url.protocol !== "http:" && url.protocol !== "https:") || url.host === "") {
+    throw new Error(`${name} is "${raw}": want an http:// or https:// URL`)
+  }
+  return url
+}
+
+/**
  * An OTLP destination: the per-signal URL, else the base URL with `path`. Undefined when
- * neither is set. Not an http(s) URL with a host is an error.
+ * neither is set.
  */
 const otlpDestination = (
   env: TelemetryEnv,
@@ -94,18 +129,16 @@ const otlpDestination = (
   path: string
 ): string | undefined => {
   const name = `OTEL_EXPORTER_OTLP_${signal}_ENDPOINT` as const
-  const own = env[name]
-  const base = env.OTEL_EXPORTER_OTLP_ENDPOINT
-  const target = own ?? (base === undefined ? undefined : `${base.replace(/\/$/, "")}${path}`)
-  if (target === undefined) return undefined
-  const url = URL.parse(target)
-  if (url === null || (url.protocol !== "http:" && url.protocol !== "https:") || url.host === "") {
-    const [variable, value] = own === undefined ? ["OTEL_EXPORTER_OTLP_ENDPOINT", base] : [name, own]
-    throw new Error(`${variable} is "${value}": want an http:// or https:// URL`)
+  const own = endpoint(name, env[name])
+  if (own !== undefined) {
+    // A per-signal URL without a path gets the signal's.
+    if (own.pathname === "/") own.pathname = path
+    return own.toString()
   }
-  // A per-signal URL without a path gets the signal's.
-  if (url.pathname === "/") url.pathname = path
-  return url.toString()
+  const base = endpoint("OTEL_EXPORTER_OTLP_ENDPOINT", env.OTEL_EXPORTER_OTLP_ENDPOINT)
+  if (base === undefined) return undefined
+  base.pathname = `${base.pathname.replace(/\/$/, "")}${path}`
+  return base.toString()
 }
 
 /** OTEL_SDK_DISABLED: unset or empty is false, else true or false. */
@@ -140,7 +173,8 @@ const metricExportInterval = (raw: string | undefined): number => {
 /**
  * The telemetry config (plat5 docs/reference/telemetry.md). With a destination, traces and
  * metrics are both pushed unless OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER leave `otlp`
- * out, or OTEL_SDK_DISABLED is true. A variable set but invalid is an error.
+ * out, or OTEL_SDK_DISABLED is true. A variable set but invalid is an error naming it
+ * (plat5 docs/reference/telemetry.md#invalid-values).
  */
 const telemetryConfig = (env: TelemetryEnv) => {
   const disabled = sdkDisabled(env.OTEL_SDK_DISABLED)
@@ -162,15 +196,12 @@ const telemetryConfig = (env: TelemetryEnv) => {
     "prometheus",
     "none"
   ])
+  const resource = serviceResource(env, VERSION)
+  endpoint("OTEL_EXPORTER_OTLP_ENDPOINT", env.OTEL_EXPORTER_OTLP_ENDPOINT)
   const tracesUrl = otlpDestination(env, "TRACES", "/v1/traces")
   const metricsUrl = otlpDestination(env, "METRICS", "/v1/metrics")
   return {
-    serviceName: env.OTEL_SERVICE_NAME ?? "api",
-    serviceNamespace: env.OTEL_SERVICE_NAMESPACE ?? "api",
-    serviceVersion: env.OTEL_SERVICE_VERSION ?? env.CI_COMMIT_TAG ?? "0.0.0",
-    serviceInstanceId: env.OTEL_SERVICE_INSTANCE_ID ?? env.HOSTNAME ?? "api-local",
-    deploymentEnv: env.OTEL_DEPLOYMENT_ENV ?? env.DEPLOYMENT_ENV ?? "development",
-    resourceAttributes: parseResourceAttributes(env.OTEL_RESOURCE_ATTRIBUTES),
+    resource,
     otlpTracesUrl: !disabled && (tracesExporters?.includes("otlp") ?? true) ? tracesUrl : undefined,
     otlpMetricsUrl: !disabled && (metricsExporters?.includes("otlp") ?? true) ? metricsUrl : undefined,
     metricExportIntervalMs: metricExportInterval(env.OTEL_METRIC_EXPORT_INTERVAL),
@@ -194,13 +225,8 @@ export class AppConfig extends Context.Tag("AppConfig")<
      * never the code's. Unset or empty, the API won't start.
      */
     readonly taskAssigneePermission: string
-    readonly serviceName: string
-    readonly serviceNamespace: string
-    readonly serviceVersion: string
-    readonly serviceInstanceId: string
-    readonly deploymentEnv: string
-    /** From OTEL_RESOURCE_ATTRIBUTES; the attributes above override these. */
-    readonly resourceAttributes: Readonly<Record<string, string>>
+    /** The OpenTelemetry resource: service.name, service.version and the rest. */
+    readonly resource: Readonly<Record<string, string>>
     /** Where traces go, or undefined for no OTLP traces. */
     readonly otlpTracesUrl: string | undefined
     /** Where metrics go, or undefined for no OTLP metrics. `/metrics` is on regardless. */

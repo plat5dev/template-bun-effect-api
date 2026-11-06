@@ -38,6 +38,10 @@ RUN bun install --frozen-lockfile --production \
 
 COPY --chown=app:app . .
 
+# The release this image reports as service.version; dev without one.
+ARG VERSION=dev
+RUN bun -e 'await Bun.write("src/Version.ts", `export const VERSION = ${JSON.stringify(process.env.VERSION)}\n`)'
+
 USER app
 
 ENV NODE_ENV=production

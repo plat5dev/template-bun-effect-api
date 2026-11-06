@@ -9,7 +9,8 @@ import {
   HttpServerResponse,
   HttpTraceContext
 } from "@effect/platform"
-import { Effect, Metric, MetricBoundaries, Option } from "effect"
+import { type Span as OtelSpan, SpanStatusCode } from "@opentelemetry/api"
+import { Cause, Effect, Exit, Layer, Metric, MetricBoundaries, Option, Tracer } from "effect"
 import {
   fieldError,
   internalError,
@@ -18,6 +19,7 @@ import {
   payloadTooLarge,
   serviceUnavailable
 } from "./Errors.js"
+import { redactQuery } from "./Redact.js"
 
 /** One route of the API: its method, its path template, and a matcher for its params. */
 type Route = {
@@ -123,7 +125,7 @@ const callerIds = (
 }
 
 /** What a 5xx is, for its log line and span: an unavailable dependency, or our own fault. */
-const errorKind = (code: string | undefined): string =>
+const errorType = (code: string | undefined): string =>
   code === "SERVICE_UNAVAILABLE" ? "network" : "internal"
 
 /**
@@ -137,7 +139,9 @@ export const httpObservability = (api: HttpApi.HttpApi.Any) => {
     Effect.gen(function*() {
       const request = yield* HttpServerRequest.HttpServerRequest
       const started = performance.now()
-      const path = request.url.split("?")[0] ?? request.url
+      const queryAt = request.url.indexOf("?")
+      const path = queryAt >= 0 ? request.url.slice(0, queryAt) : request.url
+      const query = queryAt >= 0 ? request.url.slice(queryAt + 1) : ""
       const method = request.method
       const matched = match(routes, method, path)
       const route = matched?.template ?? "unknown"
@@ -148,8 +152,11 @@ export const httpObservability = (api: HttpApi.HttpApi.Any) => {
 
       const attributes: Record<string, string> = {
         "http.request.method": method,
-        "url.path": path
+        "url.path": path,
+        // The scheme of the request this server received.
+        "url.scheme": URL.parse(request.originalUrl)?.protocol.replace(/:$/, "") ?? "http"
       }
+      if (query !== "") attributes["url.query"] = redactQuery(query)
       if (matched) attributes["http.route"] = matched.template
 
       return yield* Effect.gen(function*() {
@@ -175,7 +182,7 @@ export const httpObservability = (api: HttpApi.HttpApi.Any) => {
           yield* Effect.annotateCurrentSpan(`plat5.${field}`, value)
         }
         if (status >= 500) {
-          yield* Effect.annotateCurrentSpan("error.kind", errorKind(error?.code))
+          yield* Effect.annotateCurrentSpan("error.type", errorType(error?.code))
         }
 
         yield* recordHttpMetrics(method, route, String(status), durationMs / 1000)
@@ -197,7 +204,7 @@ export const httpObservability = (api: HttpApi.HttpApi.Any) => {
         }
         for (const [field, value] of ids) line[field] = value
         if (status >= 500) {
-          line.error_kind = errorKind(error?.code)
+          line.error_type = errorType(error?.code)
           line.error_message = error ? `${error.code}: ${error.message}` : "request failed"
         }
 
@@ -214,6 +221,45 @@ export const httpObservability = (api: HttpApi.HttpApi.Any) => {
     })
   )
 }
+
+/**
+ * HTTP server spans take their status from the response (plat5
+ * docs/reference/telemetry.md#http-server-spans): `Error` with no description on a 5xx,
+ * unset otherwise. Effect's OpenTelemetry tracer would set it from the effect's exit: `OK`
+ * on a success, and `Error` with the failure's message on a 4xx as on a 5xx. This wraps
+ * the tracer in place, so it goes after the OpenTelemetry layer; other spans are as they
+ * were.
+ */
+export const HttpServerSpanStatusLive = Layer.unwrapEffect(
+  Effect.map(Effect.tracer, (tracer) =>
+    Layer.setTracer(Tracer.make({
+      context: (f, fiber) => tracer.context(f, fiber),
+      span(name, parent, context, links, startTime, kind, options) {
+        const span = tracer.span(name, parent, context, links, startTime, kind, options)
+        // The OpenTelemetry span under Effect's, when there is one.
+        const otel = (span as { readonly span?: OtelSpan }).span
+        if (kind !== "server" || otel === undefined) return span
+        span.end = (endTime, exit) => {
+          ;(span as { status: Tracer.SpanStatus }).status = {
+            _tag: "Ended",
+            startTime: span.status.startTime,
+            endTime,
+            exit
+          }
+          const status = Number(span.attributes.get("http.response.status_code"))
+          const hrTime: [number, number] = [Number(endTime / 1_000_000_000n), Number(endTime % 1_000_000_000n)]
+          if (status >= 500) {
+            const [error] = Exit.isFailure(exit) ? Cause.prettyErrors(exit.cause) : []
+            if (error) otel.recordException(error, hrTime)
+            otel.setStatus({ code: SpanStatusCode.ERROR })
+          }
+          otel.end(hrTime)
+        }
+        return span
+      }
+    }))
+  )
+)
 
 /** A body over `MAX_BODY_BYTES` is a 413, before routing or anything reads it. */
 const withBodyLimit = <E, R>(

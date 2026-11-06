@@ -231,7 +231,7 @@ See `.env.example`. Bun loads `.env` automatically.
 | `TASK_ASSIGNEE_PERMISSION` | required | The permission an assignee needs on the task's project ([Checking an assignee](#checking-an-assignee)). The compose file and `.env.example` set `project:read`. Unset or empty → the API exits at boot |
 | `OTEL_SERVICE_NAME` | `api` | Resource `service.name` |
 | `OTEL_SERVICE_NAMESPACE` | `api` | Resource `service.namespace` |
-| `OTEL_SERVICE_VERSION` | `CI_COMMIT_TAG`, else `0.0.0` | Resource `service.version` |
+| `OTEL_SERVICE_VERSION` | the build's `VERSION`, else `dev` | Resource `service.version` ([resource identity](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#resource-identity), [Docker](#docker)) |
 | `OTEL_SERVICE_INSTANCE_ID` | `$HOSTNAME`, else `api-local` | Resource `service.instance.id` |
 | `DEPLOYMENT_ENV` / `OTEL_DEPLOYMENT_ENV` | `development` | Resource `deployment.environment` (`OTEL_DEPLOYMENT_ENV` wins) |
 | `OTEL_RESOURCE_ATTRIBUTES` | unset | Standard bag: `service.namespace=…,service.version=…,…` (vars above win) |
@@ -246,7 +246,7 @@ See `.env.example`. Bun loads `.env` automatically.
 | `OTEL_TRACES_SAMPLER_RATIO` | `1` | Trace sampling ratio, `0` to `1`; parent-based |
 | `OTEL_SDK_DISABLED` | `false` | `true` → no OTLP; stdout + `/metrics` remain |
 
-A telemetry variable that is set but invalid (an exporter other than those above, a protocol other than `http/protobuf`, an endpoint that isn't an `http://` or `https://` URL, a ratio outside `0`–`1`, an interval that isn't a positive number, `OTEL_SDK_DISABLED` other than `true` or `false`, an `OTEL_RESOURCE_ATTRIBUTES` entry without `=`) stops the API at boot, naming it.
+A telemetry variable that is set but invalid stops the API at boot, naming it ([invalid values](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#invalid-values)).
 
 ## Telemetry
 
@@ -254,9 +254,9 @@ Contract: Plat5 [`docs/reference/telemetry.md`](https://github.com/plat5dev/plat
 
 | Signal | Path |
 |--------|------|
-| Logs | JSON stdout; access line per request, with `request_id`, and `node_id` and `member_id` on task routes or `user_id` on the profile |
+| Logs | JSON stdout; access line per request, with `request_id`, and `node_id` and `member_id` on task routes or `user_id` on the profile ([logs](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#logs)) |
 | Metrics scrape | Prometheus `/metrics` on `INTERNAL_PORT` |
-| Traces | OTLP HTTP when endpoint set (default); W3C Trace Context only, `traceparent` in and on to identity; the same ids as `plat5.node_id`, `plat5.member_id`, `plat5.user_id` |
+| Traces | OTLP HTTP when endpoint set (default); W3C Trace Context only, `traceparent` in and on to identity; HTTP server spans as [the contract](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#http-server-spans) has them, `src/plat5/Redact.ts` redacting `url.query`; the same ids as `plat5.node_id`, `plat5.member_id`, `plat5.user_id` |
 | Metrics OTLP | On when endpoint set (default); set `OTEL_METRICS_EXPORTER=prometheus` to opt out |
 
 ```bash
@@ -269,7 +269,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 OTEL_METRICS_EXPORTER=promethe
 
 Under `plat5 start`, the compose file gets `OTEL_EXPORTER_OTLP_ENDPOINT` from the CLI when the observability module is on. Running on your own machine, set it yourself. Without it there's no OTLP: stdout logs and `/metrics` only, and the request's `traceparent` still goes on to identity.
 
-An export that fails, the collector unreachable say, is an `error` line, `telemetry error` with the cause in `error_message`, each time it fails; the API keeps serving.
+An export that fails, the collector unreachable say, is an `error` line, `telemetry error` with the cause in `error_message`, each time it fails; the API keeps serving ([invalid values](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#invalid-values)).
 
 Health and `/metrics` are on the internal server, with the tracer off.
 
@@ -285,7 +285,8 @@ src/
   Lifecycle.ts         # identity's lifecycle log: purged environments, deleted accounts
   Access.ts            # identity's access evaluation: assignees
   Telemetry.ts         # OTel resource, scrape + optional OTLP, MetricsScrape
-  plat5/               # errors, request bodies, timestamps, audit details, pagination, HTTP/DB observability
+  Version.ts           # service.version: the build's VERSION, written by the Dockerfile; dev without one
+  plat5/               # errors, request bodies, timestamps, audit details, pagination, HTTP/DB observability, url.query redaction
   domain/              # Profile, Task models
   Profiles/ Tasks/     # the API: Api + Http + Repo + Service
   *.test.ts            # tests, beside what they test
@@ -299,6 +300,7 @@ plat5.template.yml     # the starter's manifest
 
 ```bash
 docker compose up --build
+docker build --target prod --build-arg VERSION=v1.2.3 -t api .   # service.version v1.2.3; dev without VERSION
 ```
 
 - `local` target: hot reload, source mount

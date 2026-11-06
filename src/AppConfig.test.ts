@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test"
-import { ConfigProvider, Effect, Exit } from "effect"
+import { Cause, ConfigProvider, Effect, Exit } from "effect"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
-import { AppConfig } from "./AppConfig.js"
+import { AppConfig, serviceResource, type TelemetryEnv } from "./AppConfig.js"
 
 const missing =
   "TASK_ASSIGNEE_PERMISSION is unset or isn't a permission name ([a-z0-9:._-], at most 64 characters): set it to the permission an assignee needs on the task's project (the starter's is project:read)"
@@ -70,9 +70,13 @@ test("telemetry defaults: no OTLP without an endpoint", async () => {
   const config = await loadOk({})
   expect(config.otlpTracesUrl).toBeUndefined()
   expect(config.otlpMetricsUrl).toBeUndefined()
-  expect(config.serviceName).toBe("api")
-  expect(config.serviceVersion).toBe("0.0.0")
-  expect(config.serviceInstanceId).toBe("api-local")
+  expect(config.resource).toEqual({
+    "service.name": "api",
+    "service.namespace": "api",
+    "service.instance.id": "api-local",
+    "service.version": "dev",
+    "deployment.environment": "development"
+  })
   expect(config.tracesSamplerRatio).toBe(1)
   expect(config.metricExportIntervalMs).toBe(60_000)
 })
@@ -97,23 +101,102 @@ test("telemetry: the exporters and OTEL_SDK_DISABLED turn a signal's push off", 
   expect(own.otlpMetricsUrl).toBeUndefined()
 })
 
-test("telemetry: a variable set but invalid is a config error", async () => {
+// Each set-but-invalid value in telemetry.md's "Invalid values" table stops the API at
+// boot, with an error naming the variable.
+test("telemetry: a variable set but invalid is a config error naming it", async () => {
   for (
     const [name, value] of [
-      ["OTEL_SDK_DISABLED", "yes"],
+      ["OTEL_TRACES_EXPORTER", "jaeger"],
+      ["OTEL_TRACES_EXPORTER", "otlp,prometheus"],
+      ["OTEL_METRICS_EXPORTER", "otlp,statsd"],
       ["OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"],
       ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json"],
       ["OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "grpc"],
-      ["OTEL_TRACES_EXPORTER", "zipkin"],
-      ["OTEL_METRICS_EXPORTER", "console"],
+      ["OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4318"],
+      ["OTEL_EXPORTER_OTLP_ENDPOINT", "grpc://collector:4317"],
+      ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "ftp://collector/v1/traces"],
+      ["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "collector"],
       ["OTEL_TRACES_SAMPLER_RATIO", "1.5"],
-      ["OTEL_METRIC_EXPORT_INTERVAL", "30s"],
-      ["OTEL_EXPORTER_OTLP_ENDPOINT", "collector:4318"],
-      ["OTEL_RESOURCE_ATTRIBUTES", "service.version"]
+      ["OTEL_TRACES_SAMPLER_RATIO", "-0.1"],
+      ["OTEL_TRACES_SAMPLER_RATIO", "half"],
+      ["OTEL_METRIC_EXPORT_INTERVAL", "0"],
+      ["OTEL_METRIC_EXPORT_INTERVAL", "10s"],
+      ["OTEL_SDK_DISABLED", "yes"],
+      ["OTEL_RESOURCE_ATTRIBUTES", "service.namespace"],
+      ["OTEL_RESOURCE_ATTRIBUTES", "a=b,=c"]
     ] as const
   ) {
     const exit = await load({ TASK_ASSIGNEE_PERMISSION: "project:read", [name]: value })
-    expect(Exit.isFailure(exit)).toBe(true)
-    expect(String(exit)).toContain(name)
+    if (!Exit.isFailure(exit)) throw new Error(`${name}=${value} accepted`)
+    expect(Cause.pretty(exit.cause)).toContain(`${name} is "${value}"`)
   }
+})
+
+test("telemetry: valid values are accepted", async () => {
+  await loadOk({
+    OTEL_TRACES_EXPORTER: "otlp,none",
+    OTEL_METRICS_EXPORTER: "prometheus,none",
+    OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
+    OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example",
+    OTEL_TRACES_SAMPLER_RATIO: "0.25",
+    OTEL_METRIC_EXPORT_INTERVAL: "5000",
+    OTEL_SDK_DISABLED: "true",
+    OTEL_RESOURCE_ATTRIBUTES: "service.namespace=edge,deployment.environment=dev",
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
+  })
+})
+
+test("an invalid telemetry value stops the API at boot, naming the variable", () => {
+  const main = fileURLToPath(new URL("./main.ts", import.meta.url))
+  const run = Bun.spawnSync([process.execPath, main], {
+    cwd: tmpdir(),
+    env: { PATH: process.env.PATH ?? "", TASK_ASSIGNEE_PERMISSION: "project:read", OTEL_TRACES_SAMPLER_RATIO: "2" }
+  })
+  expect(run.exitCode).toBe(1)
+  expect(`${run.stdout}${run.stderr}`).toContain(`OTEL_TRACES_SAMPLER_RATIO is "2"`)
+})
+
+const telemetryEnv = (env: Partial<TelemetryEnv>) => env as TelemetryEnv
+
+// service.version: OTEL_SERVICE_VERSION, then OTEL_RESOURCE_ATTRIBUTES, then the build's
+// VERSION, which is dev without one. CI_COMMIT_TAG plays no part.
+test("service.version: the build's VERSION, else dev; the variables override it", async () => {
+  const ci = { CI_COMMIT_TAG: "v9.9.9" }
+  expect((await loadOk(ci)).resource["service.version"]).toBe("dev")
+  expect(serviceResource(telemetryEnv({}), "v1.2.3")["service.version"]).toBe("v1.2.3")
+  const bag = { OTEL_RESOURCE_ATTRIBUTES: "service.version=v2.0.0" }
+  expect(serviceResource(telemetryEnv(bag), "v1.2.3")["service.version"]).toBe("v2.0.0")
+  expect((await loadOk({ ...ci, ...bag })).resource["service.version"]).toBe("v2.0.0")
+  const own = { ...bag, OTEL_SERVICE_VERSION: "v3.0.0" }
+  expect(serviceResource(telemetryEnv(own), "v1.2.3")["service.version"]).toBe("v3.0.0")
+  expect((await loadOk({ ...ci, ...own })).resource["service.version"]).toBe("v3.0.0")
+})
+
+test("the resource: defaults, then OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME, then the convenience variables", async () => {
+  const bag = await loadOk({
+    HOSTNAME: "host-1",
+    OTEL_RESOURCE_ATTRIBUTES: "service.name=bag,service.namespace=edge,service.instance.id=i-1,team=a%20b"
+  })
+  expect(bag.resource).toMatchObject({
+    "service.name": "bag",
+    "service.namespace": "edge",
+    "service.instance.id": "i-1",
+    "deployment.environment": "development",
+    team: "a b"
+  })
+  const vars = await loadOk({
+    OTEL_RESOURCE_ATTRIBUTES: "service.name=bag,service.namespace=edge,deployment.environment=bag",
+    OTEL_SERVICE_NAME: "named",
+    OTEL_SERVICE_NAMESPACE: "ns",
+    OTEL_SERVICE_INSTANCE_ID: "i-2",
+    DEPLOYMENT_ENV: "staging"
+  })
+  expect(vars.resource).toMatchObject({
+    "service.name": "named",
+    "service.namespace": "ns",
+    "service.instance.id": "i-2",
+    "deployment.environment": "staging"
+  })
+  expect((await loadOk({ DEPLOYMENT_ENV: "staging", OTEL_DEPLOYMENT_ENV: "prod" })).resource["deployment.environment"])
+    .toBe("prod")
 })

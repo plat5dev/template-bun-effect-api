@@ -1,6 +1,6 @@
 import * as NodeSdk from "@effect/opentelemetry/NodeSdk"
 import * as Tracer from "@effect/opentelemetry/Tracer"
-import { diag, DiagLogLevel } from "@opentelemetry/api"
+import { diag, type DiagLogger, DiagLogLevel } from "@opentelemetry/api"
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http"
 import {
   PrometheusExporter,
@@ -16,6 +16,7 @@ import {
 } from "@opentelemetry/sdk-trace-base"
 import { Context, Effect, Layer } from "effect"
 import { AppConfig } from "./AppConfig.js"
+import { HttpServerSpanStatusLive } from "./plat5/HttpObservability.js"
 import { registerProcessMetrics } from "./plat5/ProcessMetrics.js"
 
 /** An error's message: OpenTelemetry hands an exception over as JSON, stack and all. */
@@ -30,7 +31,7 @@ const messageOf = (text: string): string => {
   return text
 }
 
-/** An OpenTelemetry error or warning, a failed export say, as a JSON line on stdout. */
+/** An OpenTelemetry error or warning, a failed export say, as one JSON line on stdout. */
 const logLine = (level: "error" | "warn", message: string) => (text: string, ...args: Array<unknown>): void => {
   console.log(
     JSON.stringify({
@@ -40,6 +41,15 @@ const logLine = (level: "error" | "warn", message: string) => (text: string, ...
       error_message: [messageOf(text), ...args.map(String)].join(" ")
     })
   )
+}
+
+/** OpenTelemetry's errors and warnings, a failed export say, each one JSON line; the API keeps serving. */
+export const diagLogger: DiagLogger = {
+  error: logLine("error", "telemetry error"),
+  warn: logLine("warn", "telemetry warning"),
+  info: () => undefined,
+  debug: () => undefined,
+  verbose: () => undefined
 }
 
 /**
@@ -57,20 +67,8 @@ export const TelemetryLive = Layer.unwrapEffect(
   Effect.gen(function*() {
     const config = yield* AppConfig
 
-    diag.setLogger({
-      error: logLine("error", "telemetry error"),
-      warn: logLine("warn", "telemetry warning"),
-      info: () => undefined,
-      debug: () => undefined,
-      verbose: () => undefined
-    }, DiagLogLevel.WARN)
+    diag.setLogger(diagLogger, DiagLogLevel.WARN)
 
-    const resourceAttributes = {
-      ...config.resourceAttributes,
-      "service.namespace": config.serviceNamespace,
-      "service.instance.id": config.serviceInstanceId,
-      "deployment.environment": config.deploymentEnv
-    }
     const otlpMetricReader = () =>
       new PeriodicExportingMetricReader({
         exporter: new OTLPMetricExporter({ url: config.otlpMetricsUrl! }),
@@ -85,11 +83,7 @@ export const TelemetryLive = Layer.unwrapEffect(
       Effect.acquireRelease(
         Effect.sync(() => {
           const provider = new MeterProvider({
-            resource: resourceFromAttributes({
-              ...resourceAttributes,
-              "service.name": config.serviceName,
-              "service.version": config.serviceVersion
-            }),
+            resource: resourceFromAttributes(config.resource),
             readers: config.otlpMetricsUrl !== undefined
               ? [processPrometheus, otlpMetricReader()]
               : [processPrometheus]
@@ -113,7 +107,7 @@ export const TelemetryLive = Layer.unwrapEffect(
                 timestamp: new Date().toISOString(),
                 level: "error",
                 message: "prometheus metrics collection errors",
-                error_kind: "internal",
+                error_type: "internal",
                 error_message: errors.map(String).join("; ")
               })
             )
@@ -134,12 +128,12 @@ export const TelemetryLive = Layer.unwrapEffect(
       ? new BatchSpanProcessor(new OTLPTraceExporter({ url: config.otlpTracesUrl }))
       : undefined
 
-    // OTEL_RESOURCE_ATTRIBUTES first; convenience identity attrs win on collision.
+    // AppConfig layers the resource; it wins over NodeSdk's own read of the environment.
     const sdkLive = NodeSdk.layer(() => ({
       resource: {
-        serviceName: config.serviceName,
-        serviceVersion: config.serviceVersion,
-        attributes: resourceAttributes
+        serviceName: config.resource["service.name"]!,
+        serviceVersion: config.resource["service.version"]!,
+        attributes: config.resource
       },
       spanProcessor,
       tracerConfig: spanProcessor
@@ -154,7 +148,8 @@ export const TelemetryLive = Layer.unwrapEffect(
 
     // Without OTLP traces, spans go to OpenTelemetry's no-op tracer: a request's span is
     // its traceparent's, so that goes on to identity as it came.
-    const tracingLive = spanProcessor ? sdkLive : Layer.provideMerge(Tracer.layerGlobal, sdkLive)
+    const otelLive = spanProcessor ? sdkLive : Layer.provideMerge(Tracer.layerGlobal, sdkLive)
+    const tracingLive = Layer.provideMerge(HttpServerSpanStatusLive, otelLive)
 
     return Layer.mergeAll(tracingLive, processLive, scrapeLive)
   })
