@@ -271,6 +271,11 @@ for (const tracesExported of [false, true]) {
     expect(res.status).toBe(201)
     expect(identity.headers[0]?.get("x-request-id")).toBe("req-1")
     expect(identity.headers[0]?.get("traceparent")).toMatch(new RegExp(`^00-${traceId}-`))
+    expect(identity.headers[0]?.get("b3")).toBeNull()
+    // Without OTLP traces the request's span is its traceparent's, which goes on as it came.
+    if (!tracesExported) {
+      expect(identity.headers[0]?.get("traceparent")).toBe(`00-${traceId}-b7ad6b7169203331-01`)
+    }
   })
 }
 

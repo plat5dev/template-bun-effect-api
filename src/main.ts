@@ -16,7 +16,21 @@ const ensureDataDir = Effect.gen(function*() {
 
 const MainLive = Layer.mergeAll(PublicHttpLive, InternalHttpLive, LifecycleLive).pipe(
   Layer.provide(SqlLive),
-  Layer.provide(TelemetryLive)
+  Layer.provide(TelemetryLive),
+  Layer.tap(() =>
+    Effect.gen(function*() {
+      const config = yield* AppConfig
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          message: "starting api server",
+          port: config.port,
+          internal_port: config.internalPort
+        })
+      )
+    })
+  )
 )
 
 // SIGINT or SIGTERM interrupts it (runMain): both servers shut down, and so does the

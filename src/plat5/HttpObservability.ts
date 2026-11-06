@@ -6,7 +6,8 @@ import {
   HttpMiddleware,
   HttpServerError,
   HttpServerRequest,
-  HttpServerResponse
+  HttpServerResponse,
+  HttpTraceContext
 } from "@effect/platform"
 import { Effect, Metric, MetricBoundaries, Option } from "effect"
 import {
@@ -189,7 +190,8 @@ export const httpObservability = (api: HttpApi.HttpApi.Any) => {
           duration_ms: durationMs
         }
         if (requestId !== null) line.request_id = requestId
-        if (span) {
+        // With OTLP traces off the span is the traceparent's, or none (all zeros).
+        if (span && !/^0+$/.test(span.traceId)) {
           line.trace_id = span.traceId
           line.span_id = span.spanId
         }
@@ -204,7 +206,9 @@ export const httpObservability = (api: HttpApi.HttpApi.Any) => {
       }).pipe(
         Effect.withSpan(spanName, {
           kind: "server",
-          attributes
+          attributes,
+          // W3C Trace Context only (plat5 docs/reference/telemetry.md#traces).
+          parent: Option.getOrUndefined(HttpTraceContext.w3c(request.headers))
         })
       )
     })

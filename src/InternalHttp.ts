@@ -63,7 +63,6 @@ export const InternalHttpLive = Layer.unwrapEffect(
         "/health/ready",
         "/metrics"
       ]),
-      HttpServer.withLogAddress,
       Layer.provide(BunHttpServer.layer({ port: config.internalPort }))
     )
   })

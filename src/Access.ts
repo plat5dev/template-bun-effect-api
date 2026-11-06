@@ -6,7 +6,7 @@
  * docs/reference/api/internal.md#access-evaluation). Only a 200 with a boolean `decision`
  * is an answer. Anything else is `NoAnswer`, logged with the request id, and no answer is no.
  */
-import { FetchHttpClient, HttpBody, HttpClient, HttpClientResponse } from "@effect/platform"
+import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest, HttpClientResponse } from "@effect/platform"
 import { Data, Duration, Effect, Schema } from "effect"
 import { AppConfig } from "./AppConfig.js"
 
@@ -26,8 +26,22 @@ const Answer = Schema.Struct({ decision: Schema.Boolean })
 export class Access extends Effect.Service<Access>()("Access", {
   effect: Effect.gen(function*() {
     const config = yield* AppConfig
-    // Traced, so the request's trace goes on to identity as traceparent.
+    // No span of its own: the request's span goes on to identity as traceparent, and
+    // nothing else (W3C Trace Context only, plat5 docs/reference/telemetry.md#traces).
     const client = (yield* HttpClient.HttpClient).pipe(
+      HttpClient.withTracerDisabledWhen(() => true),
+      HttpClient.mapRequestEffect((request) =>
+        Effect.map(Effect.option(Effect.currentParentSpan), (span) =>
+          // A span with no trace (all zeros) when OTLP traces are off and none came in.
+          span._tag === "Some" && !/^0+$/.test(span.value.traceId)
+            ? HttpClientRequest.setHeader(
+              request,
+              "traceparent",
+              `00-${span.value.traceId}-${span.value.spanId}-${span.value.sampled ? "01" : "00"}`
+            )
+            : request
+        )
+      ),
       HttpClient.filterStatus((status) => status === 200)
     )
 

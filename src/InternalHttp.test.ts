@@ -70,4 +70,7 @@ test("metrics: names, help, and labels as the other starters have them", async (
   expect(text).toMatch(/db_operations_total\{[^}]*db_operation_name="tasks\.list"[^}]*\}/)
   expect(text).toMatch(/db_operations_total\{[^}]*db_namespace="api"/)
   expect(text).not.toContain('db_namespace="app"')
+  for (const name of ["process_resident_memory_bytes", "process_cpu_seconds_total", "process_start_time_seconds"]) {
+    expect(text).toMatch(new RegExp(`^${name} [0-9.e+]+$`, "m"))
+  }
 })

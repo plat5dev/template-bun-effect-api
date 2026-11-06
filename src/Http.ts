@@ -1,7 +1,7 @@
 import {
   HttpApiBuilder,
   HttpApiSwagger,
-  HttpServer
+  HttpMiddleware
 } from "@effect/platform"
 import { BunHttpServer } from "@effect/platform-bun"
 import { Effect, Layer } from "effect"
@@ -15,8 +15,13 @@ const ApiLive = HttpApiBuilder.api(Api).pipe(
   Layer.provide([HttpProfilesLive, HttpTasksLive])
 )
 
-/** The public API, on whatever HTTP server it's given. */
+/**
+ * The public API, on whatever HTTP server it's given. Its server span is
+ * httpObservability's, so the platform's own (named `http.server {method}`, parented on b3
+ * as well as traceparent) is off.
+ */
 export const PublicApiLive = HttpApiBuilder.serve(httpObservability(Api)).pipe(
+  HttpMiddleware.withTracerDisabledWhen(() => true),
   Layer.provide(HttpApiSwagger.layer({ path: "/docs" })),
   Layer.provide(HttpApiBuilder.middlewareOpenApi()),
   // No CORS: the gateway owns it (plat5 docs/guides/write-a-service.md)
@@ -28,7 +33,6 @@ export const PublicHttpLive = Layer.unwrapEffect(
     const config = yield* AppConfig
 
     return PublicApiLive.pipe(
-      HttpServer.withLogAddress,
       Layer.provide(BunHttpServer.layer({ port: config.port }))
     )
   })

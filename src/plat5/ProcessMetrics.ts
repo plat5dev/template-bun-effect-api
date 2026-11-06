@@ -1,9 +1,8 @@
-import { metrics } from "@opentelemetry/api"
+import type { Meter } from "@opentelemetry/api"
 
-/** Minimum process metrics per plat5 docs/reference/telemetry.md (scrape path). */
-export const registerProcessMetrics = (): void => {
-  const meter = metrics.getMeter("process")
-  const startTime = Date.now() / 1000
+/** Minimum process metrics per plat5 docs/reference/telemetry.md, on `meter`. */
+export const registerProcessMetrics = (meter: Meter): void => {
+  const startTime = Date.now() / 1000 - process.uptime()
 
   meter
     .createObservableGauge("process_resident_memory_bytes", {

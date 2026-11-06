@@ -62,10 +62,11 @@ for (const decision of [true, false]) {
       action: { name: "project:read" }
     })
     expect(identity.got.headers?.get("x-request-id")).toBe("req-1")
-    // The trace goes on, from the call's own span.
-    expect(identity.got.headers?.get("traceparent")).toMatch(
-      /^00-01000000000000000000000000000000-[0-9a-f]{16}-01$/
+    // The trace goes on, from the caller's span, as traceparent alone.
+    expect(identity.got.headers?.get("traceparent")).toBe(
+      "00-01000000000000000000000000000000-0200000000000000-01"
     )
+    expect(identity.got.headers?.get("b3")).toBeNull()
   })
 }
 

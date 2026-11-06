@@ -1,5 +1,4 @@
 import { Config, ConfigError, Context, Effect, Layer } from "effect"
-import { hostname } from "node:os"
 
 const optionalNonEmpty = (name: string) =>
   Config.option(Config.string(name)).pipe(
@@ -15,20 +14,58 @@ const optionalSet = (name: string) =>
     Effect.map((opt) => (opt._tag === "Some" && opt.value !== "" ? opt.value : undefined))
   )
 
-/** Comma-separated exporter list → lowercased tokens (empty if unset). */
-const optionalExporterList = (name: string) =>
-  optionalNonEmpty(name).pipe(
-    Effect.map((raw) => {
-      if (raw === undefined) return undefined
-      const parts = raw
-        .split(",")
-        .map((s) => s.trim().toLowerCase())
-        .filter((s) => s.length > 0)
-      return parts
-    })
-  )
+/** The telemetry variables, each as set (trimmed), or undefined when unset or empty. */
+const TELEMETRY_VARIABLES = [
+  "OTEL_SERVICE_NAME",
+  "OTEL_SERVICE_NAMESPACE",
+  "OTEL_SERVICE_VERSION",
+  "CI_COMMIT_TAG",
+  "OTEL_SERVICE_INSTANCE_ID",
+  "HOSTNAME",
+  "OTEL_DEPLOYMENT_ENV",
+  "DEPLOYMENT_ENV",
+  "OTEL_RESOURCE_ATTRIBUTES",
+  "OTEL_SDK_DISABLED",
+  "OTEL_EXPORTER_OTLP_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+  "OTEL_TRACES_EXPORTER",
+  "OTEL_METRICS_EXPORTER",
+  "OTEL_TRACES_SAMPLER_RATIO",
+  "OTEL_METRIC_EXPORT_INTERVAL"
+] as const
 
-/** Parse OTEL_RESOURCE_ATTRIBUTES (`key=value,key2=value2`). */
+type TelemetryEnv = Record<(typeof TELEMETRY_VARIABLES)[number], string | undefined>
+
+/**
+ * A comma-separated OTEL_*_EXPORTER value, lowercased: undefined when unset or empty (the
+ * default applies). A value outside `allowed` is an error.
+ */
+const exporterList = (
+  name: string,
+  raw: string | undefined,
+  allowed: ReadonlyArray<string>
+): ReadonlyArray<string> | undefined => {
+  if (raw === undefined) return undefined
+  const list = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0)
+  for (const exporter of list) {
+    if (!allowed.includes(exporter)) {
+      throw new Error(`${name} is "${raw}": want a comma-separated list of ${allowed.join(", ")}`)
+    }
+  }
+  return list.length > 0 ? list : undefined
+}
+
+/**
+ * OTEL_RESOURCE_ATTRIBUTES, `key=value,…` with percent-encoded values. An entry without
+ * `=` or a key is an error.
+ */
 const parseResourceAttributes = (raw: string | undefined): Record<string, string> => {
   if (!raw) return {}
   const out: Record<string, string> = {}
@@ -36,12 +73,109 @@ const parseResourceAttributes = (raw: string | undefined): Record<string, string
     const trimmed = entry.trim()
     if (!trimmed) continue
     const eq = trimmed.indexOf("=")
-    if (eq <= 0) continue
-    const key = trimmed.slice(0, eq).trim()
-    const value = trimmed.slice(eq + 1).trim()
-    if (key) out[key] = value
+    const key = eq > 0 ? trimmed.slice(0, eq).trim() : ""
+    if (!key) throw new Error(`OTEL_RESOURCE_ATTRIBUTES: "${trimmed}" isn't key=value`)
+    try {
+      out[key] = decodeURIComponent(trimmed.slice(eq + 1).trim())
+    } catch {
+      throw new Error(`OTEL_RESOURCE_ATTRIBUTES: "${trimmed}" isn't percent-encoded`)
+    }
   }
   return out
+}
+
+/**
+ * An OTLP destination: the per-signal URL, else the base URL with `path`. Undefined when
+ * neither is set. Not an http(s) URL with a host is an error.
+ */
+const otlpDestination = (
+  env: TelemetryEnv,
+  signal: "TRACES" | "METRICS",
+  path: string
+): string | undefined => {
+  const name = `OTEL_EXPORTER_OTLP_${signal}_ENDPOINT` as const
+  const own = env[name]
+  const base = env.OTEL_EXPORTER_OTLP_ENDPOINT
+  const target = own ?? (base === undefined ? undefined : `${base.replace(/\/$/, "")}${path}`)
+  if (target === undefined) return undefined
+  const url = URL.parse(target)
+  if (url === null || (url.protocol !== "http:" && url.protocol !== "https:") || url.host === "") {
+    const [variable, value] = own === undefined ? ["OTEL_EXPORTER_OTLP_ENDPOINT", base] : [name, own]
+    throw new Error(`${variable} is "${value}": want an http:// or https:// URL`)
+  }
+  // A per-signal URL without a path gets the signal's.
+  if (url.pathname === "/") url.pathname = path
+  return url.toString()
+}
+
+/** OTEL_SDK_DISABLED: unset or empty is false, else true or false. */
+const sdkDisabled = (raw: string | undefined): boolean => {
+  if (raw === undefined) return false
+  const value = raw.toLowerCase()
+  if (value === "true") return true
+  if (value === "false") return false
+  throw new Error(`OTEL_SDK_DISABLED is "${raw}": want true or false`)
+}
+
+/** OTEL_TRACES_SAMPLER_RATIO: unset is 1, else a number from 0 to 1. */
+const samplerRatio = (raw: string | undefined): number => {
+  if (raw === undefined) return 1
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    throw new Error(`OTEL_TRACES_SAMPLER_RATIO is "${raw}": want a number from 0 to 1`)
+  }
+  return n
+}
+
+/** OTEL_METRIC_EXPORT_INTERVAL, in ms: unset is 60000, else a positive whole number. */
+const metricExportInterval = (raw: string | undefined): number => {
+  if (raw === undefined) return 60_000
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`OTEL_METRIC_EXPORT_INTERVAL is "${raw}": want a positive number of milliseconds`)
+  }
+  return n
+}
+
+/**
+ * The telemetry config (plat5 docs/reference/telemetry.md). With a destination, traces and
+ * metrics are both pushed unless OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER leave `otlp`
+ * out, or OTEL_SDK_DISABLED is true. A variable set but invalid is an error.
+ */
+const telemetryConfig = (env: TelemetryEnv) => {
+  const disabled = sdkDisabled(env.OTEL_SDK_DISABLED)
+  for (
+    const name of [
+      "OTEL_EXPORTER_OTLP_PROTOCOL",
+      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+      "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
+    ] as const
+  ) {
+    const value = env[name]
+    if (value !== undefined && value !== "http/protobuf") {
+      throw new Error(`${name} is "${value}": only http/protobuf is supported`)
+    }
+  }
+  const tracesExporters = exporterList("OTEL_TRACES_EXPORTER", env.OTEL_TRACES_EXPORTER, ["otlp", "none"])
+  const metricsExporters = exporterList("OTEL_METRICS_EXPORTER", env.OTEL_METRICS_EXPORTER, [
+    "otlp",
+    "prometheus",
+    "none"
+  ])
+  const tracesUrl = otlpDestination(env, "TRACES", "/v1/traces")
+  const metricsUrl = otlpDestination(env, "METRICS", "/v1/metrics")
+  return {
+    serviceName: env.OTEL_SERVICE_NAME ?? "api",
+    serviceNamespace: env.OTEL_SERVICE_NAMESPACE ?? "api",
+    serviceVersion: env.OTEL_SERVICE_VERSION ?? env.CI_COMMIT_TAG ?? "0.0.0",
+    serviceInstanceId: env.OTEL_SERVICE_INSTANCE_ID ?? env.HOSTNAME ?? "api-local",
+    deploymentEnv: env.OTEL_DEPLOYMENT_ENV ?? env.DEPLOYMENT_ENV ?? "development",
+    resourceAttributes: parseResourceAttributes(env.OTEL_RESOURCE_ATTRIBUTES),
+    otlpTracesUrl: !disabled && (tracesExporters?.includes("otlp") ?? true) ? tracesUrl : undefined,
+    otlpMetricsUrl: !disabled && (metricsExporters?.includes("otlp") ?? true) ? metricsUrl : undefined,
+    metricExportIntervalMs: metricExportInterval(env.OTEL_METRIC_EXPORT_INTERVAL),
+    tracesSamplerRatio: samplerRatio(env.OTEL_TRACES_SAMPLER_RATIO)
+  }
 }
 
 export class AppConfig extends Context.Tag("AppConfig")<
@@ -65,16 +199,12 @@ export class AppConfig extends Context.Tag("AppConfig")<
     readonly serviceVersion: string
     readonly serviceInstanceId: string
     readonly deploymentEnv: string
-    /** From OTEL_RESOURCE_ATTRIBUTES; convenience identity attrs override these. */
+    /** From OTEL_RESOURCE_ATTRIBUTES; the attributes above override these. */
     readonly resourceAttributes: Readonly<Record<string, string>>
-    readonly otlpEndpoint: string | undefined
-    readonly otlpTracesEndpoint: string | undefined
-    readonly otlpMetricsEndpoint: string | undefined
-    /** unset → default (otlp when destination exists) */
-    readonly tracesExporters: ReadonlyArray<string> | undefined
-    /** unset → otlp when destination exists; `/metrics` always on */
-    readonly metricsExporters: ReadonlyArray<string> | undefined
-    readonly otelSdkDisabled: boolean
+    /** Where traces go, or undefined for no OTLP traces. */
+    readonly otlpTracesUrl: string | undefined
+    /** Where metrics go, or undefined for no OTLP metrics. `/metrics` is on regardless. */
+    readonly otlpMetricsUrl: string | undefined
     readonly metricExportIntervalMs: number
     readonly tracesSamplerRatio: number
   }
@@ -96,36 +226,13 @@ export class AppConfig extends Context.Tag("AppConfig")<
             )
         )
       )
-      const serviceName = yield* Config.string("OTEL_SERVICE_NAME").pipe(Config.withDefault("api"))
-      const serviceNamespace = yield* Config.string("OTEL_SERVICE_NAMESPACE").pipe(
-        Config.withDefault("api")
-      )
-      const serviceVersion = yield* Config.string("OTEL_SERVICE_VERSION").pipe(
-        Config.withDefault("0.0.0")
-      )
-      const serviceInstanceId = yield* Config.string("OTEL_SERVICE_INSTANCE_ID").pipe(
-        Config.withDefault(hostname())
-      )
-      const deploymentEnvOtel = yield* optionalNonEmpty("OTEL_DEPLOYMENT_ENV")
-      const deploymentEnv =
-        deploymentEnvOtel ??
-        (yield* Config.string("DEPLOYMENT_ENV").pipe(Config.withDefault("development")))
-      const resourceAttributesRaw = yield* optionalNonEmpty("OTEL_RESOURCE_ATTRIBUTES")
-      const resourceAttributes = parseResourceAttributes(resourceAttributesRaw)
-      const otlpEndpoint = yield* optionalNonEmpty("OTEL_EXPORTER_OTLP_ENDPOINT")
-      const otlpTracesEndpoint = yield* optionalNonEmpty("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-      const otlpMetricsEndpoint = yield* optionalNonEmpty("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-      const tracesExporters = yield* optionalExporterList("OTEL_TRACES_EXPORTER")
-      const metricsExporters = yield* optionalExporterList("OTEL_METRICS_EXPORTER")
-      const otelSdkDisabled = yield* Config.boolean("OTEL_SDK_DISABLED").pipe(
-        Config.withDefault(false)
-      )
-      const metricExportIntervalMs = yield* Config.integer("OTEL_METRIC_EXPORT_INTERVAL").pipe(
-        Config.withDefault(30_000)
-      )
-      const tracesSamplerRatio = yield* Config.number("OTEL_TRACES_SAMPLER_RATIO").pipe(
-        Config.withDefault(1)
-      )
+      const env = yield* Effect.all(
+        Object.fromEntries(TELEMETRY_VARIABLES.map((name) => [name, optionalNonEmpty(name)]))
+      ) as Effect.Effect<TelemetryEnv, ConfigError.ConfigError>
+      const telemetry = yield* Effect.try({
+        try: () => telemetryConfig(env),
+        catch: (err) => ConfigError.InvalidData([], err instanceof Error ? err.message : String(err))
+      })
 
       return {
         port,
@@ -133,20 +240,7 @@ export class AppConfig extends Context.Tag("AppConfig")<
         databasePath,
         identityInternalUrl,
         taskAssigneePermission,
-        serviceName,
-        serviceNamespace,
-        serviceVersion,
-        serviceInstanceId,
-        deploymentEnv,
-        resourceAttributes,
-        otlpEndpoint,
-        otlpTracesEndpoint,
-        otlpMetricsEndpoint,
-        tracesExporters,
-        metricsExporters,
-        otelSdkDisabled,
-        metricExportIntervalMs,
-        tracesSamplerRatio
+        ...telemetry
       } as const
     })
   )
