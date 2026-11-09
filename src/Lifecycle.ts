@@ -56,7 +56,7 @@ const messageOf = (err: unknown) => (err instanceof Error ? err.message : String
 
 /**
  * The log's reader, on `identityUrl`, identity's internal base URL. `retry` is the wait after
- * an error, or after an immediate answer with no events.
+ * an error.
  */
 export class Lifecycle extends Context.Service<Lifecycle>()("api/Lifecycle", {
   make: Effect.fnUntraced(function*(identityUrl: string, retry: Duration.Input = RETRY_AFTER) {
@@ -82,20 +82,21 @@ export class Lifecycle extends Context.Service<Lifecycle>()("api/Lifecycle", {
         ON CONFLICT (id) DO UPDATE SET event_id = excluded.event_id
       `.pipe(Effect.asVoid, trackDb("feed_cursors.save"))
 
+    const clearCursor = sql`DELETE FROM feed_cursors`.pipe(Effect.asVoid, trackDb("feed_cursors.delete"))
+
     /**
      * Asks for the events after `after`, or from the first event when there's none yet.
-     * With a cursor identity waits for one; its 204 is no events, and `waited`.
+     * With nothing to answer, identity waits for an event, then answers 204: no events.
+     * Its 409 `CURSOR_AHEAD` is `"reset"`: the log was reset, past the cursor.
      */
     const fetchPage = (after: string) =>
       client.get(url, {
         urlParams: after === "" ? { types: TYPES, limit: PAGE_SIZE } : { types: TYPES, limit: PAGE_SIZE, after }
       }).pipe(
         Effect.flatMap(HttpClientResponse.matchStatus({
-          200: (res) =>
-            HttpIncomingMessage.schemaBodyJson(Page)(res).pipe(
-              Effect.map((page) => ({ events: page.events, waited: false }))
-            ),
-          204: () => Effect.succeed({ events: [] as ReadonlyArray<Event>, waited: true }),
+          200: (res) => Effect.map(HttpIncomingMessage.schemaBodyJson(Page)(res), (page) => page.events),
+          204: () => Effect.succeed([] as ReadonlyArray<Event>),
+          409: () => Effect.succeed("reset" as const),
           orElse: (res) => Effect.fail(new LifecycleError({ message: `lifecycle log answered ${res.status}` }))
         })),
         Effect.timeout(REQUEST_TIMEOUT)
@@ -133,29 +134,27 @@ export class Lifecycle extends Context.Service<Lifecycle>()("api/Lifecycle", {
 
     /**
      * Asks once for the events after the saved cursor, acts on them, and saves the cursor
-     * past them in the same transaction as their deletes. Succeeds with whether to ask again
-     * at once: after a page of events, or a 204 (identity waited and nothing came). A defect
-     * is a failure, so it is logged and retried like one.
+     * past them in the same transaction as their deletes. A reset log clears the cursor, so
+     * the next step reads from the first event again: safe, as acting twice changes nothing.
+     * A defect is a failure, so it is logged and retried like one.
      */
     const step = Effect.gen(function*() {
       const after = yield* cursor
-      const { events, waited } = yield* fetchPage(after)
-      const last = events.at(-1)
-      if (last === undefined) return waited
-      yield* apply(events, last.id)
-      yield* log("info", "lifecycle page read", { events: events.length, after, cursor: last.id })
-      return true
+      const page = yield* fetchPage(after)
+      if (page === "reset") {
+        yield* log("warn", "the lifecycle log was reset: reading it again from its first event", { after })
+        return yield* clearCursor
+      }
+      const last = page.at(-1)
+      if (last === undefined) return
+      yield* apply(page, last.id)
+      yield* log("info", "lifecycle page read", { events: page.length, after, cursor: last.id })
     }).pipe(Effect.catchDefect((defect) => Effect.fail(new LifecycleError({ message: messageOf(defect) }))))
 
-    /** After a page or a 204, ask again at once; after an immediate empty answer, after `retry`. */
-    const pace = Schedule.forever.pipe(
-      Schedule.passthrough,
-      Schedule.addDelay(({ output: again }) => Effect.succeed(again ? Duration.zero : retry))
-    )
-
     /**
-     * Follows the log until interrupted, which also cancels a read in flight. An error is
-     * logged and the read asked again after `retry`, from the same cursor.
+     * Follows the log until interrupted, which also cancels a read in flight. Whatever came,
+     * it asks again at once: identity waits when there's nothing. An error is logged and the
+     * read asked again after `retry`, from the same cursor.
      */
     const run = Effect.gen(function*() {
       // A failure here fails the first step the same way, and is logged there.
@@ -175,7 +174,7 @@ export class Lifecycle extends Context.Service<Lifecycle>()("api/Lifecycle", {
           })
         ),
         Effect.retry(Schedule.spaced(retry)),
-        Effect.repeat(pace)
+        Effect.forever
       )
     })
 

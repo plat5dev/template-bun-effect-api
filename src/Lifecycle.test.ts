@@ -23,9 +23,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
  * Identity, serving the one lifecycle log at /internal/events as identity does: types
- * filters, two events to a page, no after is answered at once, and with after it waits for
- * a matching event up to `wait` ms, then answers 204. The first requests answer `fail`'s
- * statuses, one each.
+ * filters, two events to a page; with nothing to answer, with or without after, it waits for
+ * a matching event up to `wait` ms, then answers 204; an after past the newest event is 409
+ * CURSOR_AHEAD. The first requests answer `fail`'s statuses, one each.
  */
 const serveIdentity = (events: Served[] = []) => {
   const identity = {
@@ -68,9 +68,21 @@ const serveIdentity = (events: Served[] = []) => {
       identity.limits.push(url.searchParams.get("limit") ?? "")
       const failure = identity.fail.shift()
       if (failure !== undefined) return new Response(null, { status: failure })
+      const newest = Math.max(0, ...events.map((e) => Number(e.id)))
+      if (after !== "" && Number(after) > newest) {
+        return Response.json({
+          error: {
+            type: "invalid_request_error",
+            code: "CURSOR_AHEAD",
+            message: "The log has no event at this cursor. Read from its first event.",
+            request_id: null,
+            details: null
+          }
+        }, { status: 409 })
+      }
       let answer = page(after, types)
       const deadline = performance.now() + identity.wait
-      while (after !== "" && answer.events.length === 0) {
+      while (answer.events.length === 0) {
         const left = deadline - performance.now()
         const outcome = await new Promise<"added" | "timeout" | "closed">((resolve) => {
           const done = (outcome: "added" | "timeout" | "closed") => {
@@ -223,9 +235,7 @@ test("acts on each page and advances the cursor", async () => {
   await s.seed()
 
   // No cursor yet: from the first event, then from each page's last id.
-  for (let i = 0; i < 2; i++) {
-    expect(await s.step()).toBe(true)
-  }
+  for (let i = 0; i < 2; i++) await s.step()
   await s.checkActed()
   expect(await s.cursor()).toBe("13")
   expect(identity.asked).toEqual(["", "12"])
@@ -241,7 +251,7 @@ test("a 204 is asked again at once", async () => {
   await s.step()
 
   // At the head: identity waits, answers 204, and nothing changes.
-  expect(await s.step()).toBe(true)
+  await s.step()
   expect(await s.cursor()).toBe("13")
   expect(identity.asked.at(-1)).toBe("13")
 })
@@ -286,13 +296,30 @@ test("an error is retried", async () => {
   ])
 })
 
-test("an empty log is not asked in a tight loop", async () => {
+test("an empty log waits, as identity does, and changes nothing", async () => {
   const identity = serveIdentity()
-  const s = await setup(identity, Duration.millis(50))
-  // An immediate empty answer waits before asking again.
-  expect(await s.step()).toBe(false)
-  await Effect.runPromise(Effect.race(s.run, Effect.sleep(Duration.millis(120))))
-  expect(identity.asked.length).toBeLessThanOrEqual(5)
+  const s = await setup(identity)
+  await s.step()
+  expect(await s.cursor()).toBe("")
+  expect(identity.asked).toEqual([""])
+})
+
+test("a reset log (409 CURSOR_AHEAD) clears the cursor, and the log is read again from its first event", async () => {
+  const identity = theLog()
+  const s = await setup(identity)
+  await s.seed()
+  await s.sqlExec("INSERT INTO feed_cursors (id, event_id) VALUES (1, '99')")
+
+  await s.step()
+  expect(await s.cursor()).toBe("")
+  expect(s.logged().find((line) => String(line.message).startsWith("the lifecycle log was reset"))).toMatchObject({
+    level: "warn",
+    after: "99"
+  })
+  for (let i = 0; i < 2; i++) await s.step()
+  await s.checkActed()
+  expect(await s.cursor()).toBe("13")
+  expect(identity.asked).toEqual(["99", "", "12"])
 })
 
 test("stopping cancels the read in flight", async () => {
