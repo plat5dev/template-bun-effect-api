@@ -9,9 +9,9 @@
  * with the data it cleans up, and saved in the same transaction as a page's deletes. Acting
  * again on the same event changes nothing, so the log can be replayed by resetting it.
  */
-import { FetchHttpClient, HttpClient } from "@effect/platform"
-import { SqlClient } from "@effect/sql"
-import { Cause, Duration, Effect, Layer } from "effect"
+import { Context, Duration, Effect, Layer, Schedule, Schema } from "effect"
+import { FetchHttpClient, HttpClient, HttpClientResponse, HttpIncomingMessage } from "effect/http"
+import { SqlClient } from "effect/sql"
 import { AppConfig } from "./AppConfig.js"
 import { trackDb } from "./plat5/DbMetrics.js"
 import { ProfilesRepo } from "./Profiles/Repo.js"
@@ -26,78 +26,52 @@ export const RETRY_AFTER = Duration.seconds(5)
 const REQUEST_TIMEOUT = Duration.seconds(40)
 const PAGE_SIZE = 100
 
-/** The part of an event the API reads: each field a string, "" when absent or null. */
-export type Event = {
-  readonly id: string
-  readonly type: string
-  readonly kind: string
-  readonly node_id: string
-  readonly user_id: string
-}
+const OptionalText = Schema.optionalKey(Schema.NullOr(Schema.String))
 
-const EVENT_FIELDS = ["id", "type", "kind", "node_id", "user_id"] as const
+/** The part of an event the API reads (plat5 docs/reference/api/internal.md#lifecycle-events). */
+export const Event = Schema.Struct({
+  id: Schema.String,
+  type: Schema.String,
+  kind: OptionalText,
+  node_id: OptionalText,
+  user_id: OptionalText
+})
+export type Event = typeof Event.Type
 
-/** An event as read: keys matched ignoring case, a null event all "". Another type is an error. */
-const decodeEvent = (raw: unknown): Event => {
-  const event: Record<string, string> = { id: "", type: "", kind: "", node_id: "", user_id: "" }
-  if (raw === null) return event as Event
-  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("event is not an object")
-  for (const [key, value] of Object.entries(raw)) {
-    const name = EVENT_FIELDS.find((n) => n === key || n === key.toLowerCase())
-    if (name === undefined || value === null) continue
-    if (typeof value !== "string") throw new Error(`event ${name} is not a string`)
-    event[name] = value
-  }
-  return event as Event
-}
+/** A page of the log: its events. */
+export const Page = Schema.Struct({ events: Schema.Array(Event) })
 
-/** A page of the log: its `events`, a list. Missing, null, or another type is an error. */
-export const decodePage = (page: unknown): ReadonlyArray<Event> => {
-  if (typeof page !== "object" || page === null || Array.isArray(page)) {
-    throw new Error("lifecycle log: not an object")
-  }
-  const events = (page as Record<string, unknown>).events
-  if (events === undefined || events === null) {
-    throw new Error("lifecycle log: no events in its answer")
-  }
-  if (!Array.isArray(events)) throw new Error("lifecycle log: events: not a list")
-  return events.map(decodeEvent)
-}
+/** Reading or acting on the log failed: logged, and asked again later. */
+export class LifecycleError extends Schema.TaggedError<LifecycleError>()("LifecycleError", {
+  message: Schema.String
+}) {}
 
-const log = (level: string, message: string, fields: Record<string, unknown> = {}) =>
-  Effect.sync(() =>
-    console.log(
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level,
-        message,
-        component: "lifecycle",
-        ...fields
-      })
-    )
-  )
+const logAt = { info: Effect.logInfo, warn: Effect.logWarning, error: Effect.logError } as const
 
-const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err))
+/** A lifecycle line: `component: lifecycle`, then `fields`. */
+const log = (level: keyof typeof logAt, message: string, fields: Record<string, unknown> = {}) =>
+  logAt[level](message).pipe(Effect.annotateLogs({ component: "lifecycle", ...fields }))
+
+const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 /**
- * Reads the log at `identityUrl`, identity's internal base URL. `retry` is the wait after
+ * The log's reader, on `identityUrl`, identity's internal base URL. `retry` is the wait after
  * an error, or after an immediate answer with no events.
  */
-export const consumer = (identityUrl: string, retry: Duration.DurationInput = RETRY_AFTER) =>
-  Effect.gen(function*() {
+export class Lifecycle extends Context.Service<Lifecycle>()("api/Lifecycle", {
+  make: Effect.fnUntraced(function*(identityUrl: string, retry: Duration.Input = RETRY_AFTER) {
     const sql = yield* SqlClient.SqlClient
     const tasks = yield* TasksRepo
     const profiles = yield* ProfilesRepo
     // A read held open for up to 25 s isn't a request worth a trace.
-    const client = (yield* HttpClient.HttpClient).pipe(
-      HttpClient.withTracerDisabledWhen(() => true)
+    const client = HttpClient.transform(
+      yield* HttpClient.HttpClient,
+      (effect) => Effect.provideService(effect, HttpClient.TracerDisabledWhen, () => true)
     )
     const url = `${identityUrl}/internal/events`
 
     /** The last event id acted on, or "" before the first. */
-    const cursor = sql<{ event_id: string }>`
-      SELECT event_id FROM feed_cursors WHERE id = 1
-    `.pipe(
+    const cursor = sql<{ event_id: string }>`SELECT event_id FROM feed_cursors WHERE id = 1`.pipe(
       Effect.map((rows) => rows[0]?.event_id ?? ""),
       trackDb("feed_cursors.find")
     )
@@ -114,50 +88,28 @@ export const consumer = (identityUrl: string, retry: Duration.DurationInput = RE
      */
     const fetchPage = (after: string) =>
       client.get(url, {
-        urlParams: after === ""
-          ? { types: TYPES, limit: PAGE_SIZE }
-          : { types: TYPES, limit: PAGE_SIZE, after }
+        urlParams: after === "" ? { types: TYPES, limit: PAGE_SIZE } : { types: TYPES, limit: PAGE_SIZE, after }
       }).pipe(
-        Effect.flatMap((res) => {
-          if (res.status === 204) {
-            return Effect.succeed({ events: [] as ReadonlyArray<Event>, waited: true })
-          }
-          if (res.status !== 200) {
-            return Effect.fail(new Error(`lifecycle log answered ${res.status}`))
-          }
-          return res.json.pipe(
-            Effect.flatMap((page) =>
-              Effect.try({
-                try: () => decodePage(page),
-                catch: (err) => new Error(errorMessage(err))
-              })
+        Effect.flatMap(HttpClientResponse.matchStatus({
+          200: (res) =>
+            HttpIncomingMessage.schemaBodyJson(Page)(res).pipe(
+              Effect.map((page) => ({ events: page.events, waited: false }))
             ),
-            Effect.map((events) => ({ events, waited: false }))
-          )
-        }),
-        Effect.scoped,
+          204: () => Effect.succeed({ events: [] as ReadonlyArray<Event>, waited: true }),
+          orElse: (res) => Effect.fail(new LifecycleError({ message: `lifecycle log answered ${res.status}` }))
+        })),
         Effect.timeout(REQUEST_TIMEOUT)
       )
 
     const act = (event: Event): Effect.Effect<void> => {
-      if (event.type === "node.purged" && event.kind === "project") {
+      if (event.type === "node.purged" && event.kind === "project" && event.node_id) {
         return tasks.deleteByProject(event.node_id).pipe(
-          Effect.zipRight(
-            log("info", "purged project's tasks deleted", {
-              event_id: event.id,
-              node_id: event.node_id
-            })
-          )
+          Effect.andThen(log("info", "purged project's tasks deleted", { event_id: event.id, node_id: event.node_id }))
         )
       }
-      if (event.type === "user.deleted") {
+      if (event.type === "user.deleted" && event.user_id) {
         return profiles.deleteByUserId(event.user_id).pipe(
-          Effect.zipRight(
-            log("info", "profile deleted with its account", {
-              event_id: event.id,
-              user_id: event.user_id
-            })
-          )
+          Effect.andThen(log("info", "profile deleted with its account", { event_id: event.id, user_id: event.user_id }))
         )
       }
       return Effect.void
@@ -172,20 +124,18 @@ export const consumer = (identityUrl: string, retry: Duration.DurationInput = RE
         events,
         (event) =>
           act(event).pipe(
-            Effect.catchAllDefect((defect) =>
-              Effect.fail(new Error(`event ${event.id}: ${errorMessage(defect)}`))
+            Effect.catchDefect((defect) =>
+              Effect.fail(new LifecycleError({ message: `event ${event.id}: ${messageOf(defect)}` }))
             )
           ),
         { discard: true }
-      ).pipe(
-        Effect.zipRight(saveCursor(last)),
-        sql.withTransaction
-      )
+      ).pipe(Effect.andThen(saveCursor(last)), sql.withTransaction)
 
     /**
      * Asks once for the events after the saved cursor, acts on them, and saves the cursor
      * past them in the same transaction as their deletes. Succeeds with whether to ask again
-     * at once: after a page of events, or a 204 (identity waited and nothing came).
+     * at once: after a page of events, or a 204 (identity waited and nothing came). A defect
+     * is a failure, so it is logged and retried like one.
      */
     const step = Effect.gen(function*() {
       const after = yield* cursor
@@ -195,13 +145,17 @@ export const consumer = (identityUrl: string, retry: Duration.DurationInput = RE
       yield* apply(events, last.id)
       yield* log("info", "lifecycle page read", { events: events.length, after, cursor: last.id })
       return true
-    })
+    }).pipe(Effect.catchDefect((defect) => Effect.fail(new LifecycleError({ message: messageOf(defect) }))))
+
+    /** After a page or a 204, ask again at once; after an immediate empty answer, after `retry`. */
+    const pace = Schedule.forever.pipe(
+      Schedule.passthrough,
+      Schedule.addDelay(({ output: again }) => Effect.succeed(again ? Duration.zero : retry))
+    )
 
     /**
-     * Follows the log until interrupted, which also cancels a read in flight. After a page or
-     * a 204 it asks again at once; after an error it logs it and asks again after `retry`.
-     * An immediate answer with no events (an empty log, or a cursor past identity's newest
-     * event) is also asked again after `retry`, so it isn't asked in a tight loop.
+     * Follows the log until interrupted, which also cancels a read in flight. An error is
+     * logged and the read asked again after `retry`, from the same cursor.
      */
     const run = Effect.gen(function*() {
       // A failure here fails the first step the same way, and is logged there.
@@ -214,28 +168,27 @@ export const consumer = (identityUrl: string, retry: Duration.DurationInput = RE
         Effect.ignore
       )
       return yield* step.pipe(
-        Effect.catchAllCause((cause) =>
-          Cause.isInterruptedOnly(cause)
-            ? Effect.failCause(cause)
-            : log("error", "lifecycle read failed", {
-              error_message: errorMessage(Cause.squash(cause)),
-              retry_in_ms: Duration.toMillis(retry)
-            }).pipe(Effect.as(false))
+        Effect.tapError((err) =>
+          log("error", "lifecycle read failed", {
+            error_message: err.message,
+            retry_in_ms: Duration.toMillis(Duration.fromInputUnsafe(retry))
+          })
         ),
-        Effect.flatMap((again) => (again ? Effect.void : Effect.sleep(retry))),
-        Effect.forever
+        Effect.retry(Schedule.spaced(retry)),
+        Effect.repeat(pace)
       )
     })
 
     return { cursor, step, run } as const
   })
+}) {}
 
 /**
  * Follows the log for as long as the app runs. Shutting down interrupts it, cancelling a
  * read in flight, and waits for it before the database closes. With
  * `IDENTITY_INTERNAL_URL` unset the log isn't read, and the app says so once at boot.
  */
-export const LifecycleLive = Layer.unwrapEffect(
+export const LifecycleLive = Layer.unwrap(
   Effect.gen(function*() {
     const config = yield* AppConfig
     if (config.identityInternalUrl === undefined) {
@@ -246,14 +199,8 @@ export const LifecycleLive = Layer.unwrapEffect(
         )
       )
     }
-    return Layer.scopedDiscard(
-      consumer(config.identityInternalUrl).pipe(
-        Effect.flatMap(({ run }) => Effect.forkScoped(run))
-      )
-    ).pipe(
-      Layer.provide(TasksRepo.Default),
-      Layer.provide(ProfilesRepo.Default),
-      Layer.provide(FetchHttpClient.layer)
-    )
+    return Layer.effectDiscard(
+      Lifecycle.make(config.identityInternalUrl).pipe(Effect.flatMap(({ run }) => Effect.forkScoped(run)))
+    ).pipe(Layer.provide([TasksRepo.layerNoDeps, ProfilesRepo.layerNoDeps, FetchHttpClient.layer]))
   })
-).pipe(Layer.provide(SqlLive), Layer.provide(AppConfig.Live))
+).pipe(Layer.provide(SqlLive), Layer.provide(AppConfig.layer))

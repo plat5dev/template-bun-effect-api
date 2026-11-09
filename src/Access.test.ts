@@ -1,6 +1,9 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { ConfigProvider, Effect, Either, Tracer } from "effect"
+import { Effect, Result, Tracer } from "effect"
+import { HttpServerRequest } from "effect/http"
 import { Access, type Question } from "./Access.js"
+import { envLayer } from "./testing.js"
+import * as Log from "./plat5/Log.js"
 
 const member = "01jd8x3k7q00000000000000mm"
 const project = "01jd8x3k7q00000000000000pp"
@@ -31,18 +34,21 @@ const serveIdentity = (status: number, body: string) => {
 }
 
 /**
- * Asks identity at `identityUrl` (unset when undefined), as the API would, under `parent`
- * when there is one.
+ * Asks identity at `identityUrl` (unset when undefined), as the API would during a request
+ * with `requestId` as its X-Request-ID, under `parent` when there is one.
  */
 const evaluate = (identityUrl: string | undefined, requestId: string, parent?: Tracer.AnySpan) => {
   const config = new Map([["TASK_ASSIGNEE_PERMISSION", "project:read"]])
   if (identityUrl !== undefined) config.set("IDENTITY_INTERNAL_URL", identityUrl)
-  const ask = Effect.flatMap(Access, (access) => access.evaluate(question, requestId))
+  const request = HttpServerRequest.fromWeb(new Request("http://api/", { headers: { "x-request-id": requestId } }))
+  const ask = Effect.flatMap(Access, (access) => access.evaluate(question)).pipe(
+    Effect.provideService(HttpServerRequest.HttpServerRequest, request)
+  )
   return Effect.runPromise(
     (parent ? Effect.withParentSpan(ask, parent) : ask).pipe(
-      Effect.either,
-      Effect.provide(Access.Default),
-      Effect.withConfigProvider(ConfigProvider.fromMap(config))
+      Effect.result,
+      Effect.provide([Access.layer, Log.layer]),
+      Effect.provide(envLayer(config))
     )
   )
 }
@@ -55,18 +61,15 @@ for (const decision of [true, false]) {
       spanId: "0200000000000000"
     })
 
-    expect(await evaluate(identity.url, "req-1", parent)).toEqual(Either.right(decision))
+    expect(await evaluate(identity.url, "req-1", parent)).toEqual(Result.succeed(decision))
     expect(identity.got.body).toEqual({
       subject: { type: "member", id: member },
       resource: { type: "project", id: project },
       action: { name: "project:read" }
     })
     expect(identity.got.headers?.get("x-request-id")).toBe("req-1")
-    // The trace goes on, from the caller's span, as traceparent alone.
-    expect(identity.got.headers?.get("traceparent")).toBe(
-      "00-01000000000000000000000000000000-0200000000000000-01"
-    )
-    expect(identity.got.headers?.get("b3")).toBeNull()
+    // The trace goes on as traceparent, the call a span under the caller's.
+    expect(identity.got.headers?.get("traceparent")).toMatch(/^00-01000000000000000000000000000000-[0-9a-f]{16}-01$/)
   })
 }
 
@@ -84,7 +87,7 @@ for (const [name, status, body] of [
     const identity = serveIdentity(status, body)
 
     const got = await evaluate(identity.url, "req-1")
-    expect(Either.isLeft(got)).toBe(true)
+    expect(Result.isFailure(got)).toBe(true)
     // Logged with the request id.
     const line = JSON.parse(String(logs.mock.calls[0]?.[0]))
     expect(line.message).toBe("access evaluation failed")
@@ -99,7 +102,7 @@ test("no answer is an error: identity unreachable or unset", async () => {
   const url = `http://127.0.0.1:${closed.port}`
   await closed.stop(true)
 
-  expect(Either.isLeft(await evaluate(url, ""))).toBe(true)
+  expect(Result.isFailure(await evaluate(url, ""))).toBe(true)
   const unset = await evaluate(undefined, "")
-  expect(Either.isLeft(unset) && unset.left.message).toBe("IDENTITY_INTERNAL_URL is unset")
+  expect(Result.isFailure(unset) && unset.failure.message).toBe("IDENTITY_INTERNAL_URL is unset")
 })

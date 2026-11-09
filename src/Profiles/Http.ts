@@ -1,17 +1,18 @@
-import { HttpApiBuilder } from "@effect/platform"
 import { Effect, Layer } from "effect"
+import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../Api.js"
-import { readBody } from "../plat5/Body.js"
+import { Plat5Request } from "../plat5/Request.js"
 import { Profiles } from "./Service.js"
 
-export const HttpProfilesLive = HttpApiBuilder.group(Api, "profiles", (handlers) =>
-  Effect.gen(function*() {
+export const HttpProfilesLive = HttpApiBuilder.group(
+  Api,
+  "profiles",
+  Effect.fn(function*(handlers) {
     const profiles = yield* Profiles
 
-    return handlers
-      .handle("get", ({ path }) => profiles.getOrCreate(path.user_id))
-      // Raw: it reads its own body (src/plat5/Body.ts).
-      .handleRaw("upsert", ({ path }) =>
-        readBody(["bio"]).pipe(Effect.flatMap((fields) => profiles.upsert(path.user_id, fields))))
+    return handlers.handleAll({
+      get: ({ params }) => profiles.getOrCreate(params.user_id),
+      upsert: ({ params, payload }) => profiles.upsert(params.user_id, payload)
+    })
   })
-).pipe(Layer.provide(Profiles.Default))
+).pipe(Layer.provide([Profiles.layer, Plat5Request.layer]))

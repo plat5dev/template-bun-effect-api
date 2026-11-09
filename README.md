@@ -1,6 +1,6 @@
 # Bun + Effect API starter
 
-A Plat5 API starter: **Bun** runtime + package manager, **Effect** (`HttpApi` + `@effect/sql-sqlite-bun`), Prometheus + OTel. It serves tasks inside a project, and the person's own profile. The repo is a Plat5 project you can run as is: `plat5 start` in this directory runs Plat5, applies `plat5.yml`, and runs the API beside it.
+A Plat5 API starter: **Bun** runtime + package manager, **Effect** (`HttpApi` + `@effect/sql-sqlite-bun`), Prometheus + OTLP, all with Effect's own telemetry. It serves tasks inside a project, and the person's own profile. The repo is a Plat5 project you can run as is: `plat5 start` in this directory runs Plat5, applies `plat5.yml`, and runs the API beside it.
 
 Plat5 decides who may call what, at its gateway. This service owns business logic only: it reads the node ids and the caller's member id the front door gives it, and checks nothing about the caller ([plat5 `docs/guides/write-a-service.md`](https://github.com/plat5dev/plat5/blob/master/docs/guides/write-a-service.md)).
 
@@ -8,10 +8,15 @@ Plat5 decides who may call what, at its gateway. This service owns business logi
 
 | Piece | Choice |
 |-------|--------|
-| Runtime / installs | Bun |
-| HTTP | `effect` + `@effect/platform` `HttpApi` + `@effect/platform-bun` (OpenAPI at `/docs`) |
-| Schema | `effect/Schema`, `@effect/sql` `Model`, describing the API for its OpenAPI; write bodies are checked by hand (`src/plat5/Body.ts`), keys matched exactly, so every answer is the API's own |
-| DB | SQLite via `@effect/sql-sqlite-bun`, with its migrator |
+| Runtime / installs | Bun 1.4.4 or later (the Dockerfile and CI pin 1.4) |
+| Effect | `effect` 4: `effect/http-api` `HttpApi` on `effect/http` `HttpRouter`, served by `@effect/platform-bun` (Swagger UI at `/docs`, the document at `/openapi.json`) |
+| Services | Each one a `Context.Service` built by its `make`, with a static `layer` (its dependencies provided) and `layerNoDeps` (for tests); methods are `Effect.fn`, each its own span |
+| Schema | `effect/Schema` for every request (params, query, headers, bodies, with their checks and sentences) and `effect/schema` `Model` for the tables; the same schemas are the OpenAPI document. `src/plat5/Request.ts` turns what doesn't decode into Plat5's 400 or 422 |
+| DB | SQLite via `@effect/sql-sqlite-bun` on `effect/sql`, with its migrator |
+| Errors | Services fail with Plat5's errors, tagged errors in `src/plat5/Errors.ts` (`NotFound`, `ValidationFailed`…) that know nothing of HTTP; an endpoint lists the ones it answers (`HttpErrors.NotFound`…), whose schemas write [the envelope](https://github.com/plat5dev/plat5/blob/master/docs/reference/errors.md) with the request's `X-Request-ID` |
+| Telemetry | `effect/observability`, no OpenTelemetry SDK: `PrometheusMetrics` for `/metrics`, `OtlpTracer` and `OtlpMetrics` to push. The process series are Effect gauges (`src/plat5/ProcessMetrics.ts`) |
+| Logs | `Effect.logInfo` and friends, fields with `Effect.annotateLogs`; `src/plat5/Log.ts` writes each as one JSON line, and `TelemetryLive` installs it |
+| Time | The models set `created_at` and `updated_at` (`Model.DateTimeInsert`, `Model.DateTimeUpdate`) on Effect's `Clock`: RFC 3339 in UTC, to the millisecond |
 | Dev | `bun --watch` |
 | Tests | `bun test`, the API on a Bun server of its own, identity faked by a local HTTP server |
 | IDs | ULID, lowercase |
@@ -39,7 +44,7 @@ A task is authored: `created_by` is the member id of whoever created it, and sta
 
 Ids are lowercase ULIDs with no prefix, like every Plat5 id.
 
-Request bodies match keys exactly; an unknown field is a **422** naming it. `{"Title": …}` isn't `title`: each unknown field is in `details.fields` once, in the body's order, as `{"path": "Title", "message": "Title isn't a field."}`, and the first one's sentence is the `message`. A nested field's path is `address.street`, an array item's `tags[0].name`. A body with an unknown field is refused before its values are checked.
+A write's body is JSON: not sent as `application/json`, empty, or not JSON is a **400** `INVALID_REQUEST`, as is a create without `X-Plat5-Member-Id` ([plat5 `docs/reference/errors.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/errors.md#which-status)). Its values are checked by its schema (`src/domain/Task.ts`, `src/domain/Profile.ts`): each wrong one is in a **422**'s `details.fields`, at its path (`title`, `address.street`, `tags[0].name`; the body itself, an array say, is `body`), with its sentence, and the first one's sentence is the `message`. Keys match exactly: `{"Title": …}` isn't `title`, and a body with an unknown key is refused for those alone, before its values are checked, each `{"path": "Title", "message": "Title isn't a field."}`.
 
 ## The config
 
@@ -67,7 +72,7 @@ Only front doors may reach the API: Plat5's gateway, an operator plane, anything
 | `X-Request-ID` | The front door | Every request: logged, and in error bodies. Never set on a response |
 | `traceparent` | The front door | Every request: the server span's parent |
 
-The gateway also sends `X-Plat5-Project-Id`, `X-Plat5-Organization-Id` and `X-Plat5-User-Id`; the API reads the project's and the user's ids from the path, and has no use for the organization's. It never sees `Authorization`, a slug, a principal id, or the caller's permissions or role ([plat5 `docs/reference/headers.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/headers.md)).
+The gateway also sends `X-Plat5-Project-Id`, `X-Plat5-Organization-Id` and `X-Plat5-User-Id`; the API reads the project's and the user's ids from the path, logs the project's and the user's from their headers, and has no use for the organization's. A body's size is the gateway's to limit (`max_body_bytes`). It never sees `Authorization`, a slug, a principal id, or the caller's permissions or role ([plat5 `docs/reference/headers.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/headers.md)).
 
 Every lookup is scoped by the project id in the path, and nothing checks that the project exists or that the caller may act: the front door decided. A task id under another project is **404**.
 
@@ -121,11 +126,11 @@ It logs `following the lifecycle log from its first event`, then each page it re
 
 ## Lists
 
-The task list pages like every Plat5 list ([plat5 `docs/reference/lists.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/lists.md)). `src/plat5/Pagination.ts` reads the params.
+The task list pages like every Plat5 list ([plat5 `docs/reference/lists.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/lists.md)). `src/plat5/Pagination.ts` is their schema.
 
 | | |
 |---|---|
-| `limit` | Default 50, max 100. Over the max is clamped. Under 1 or not a number → **422** |
+| `limit` | Default 50, max 100. Over the max is clamped. Under 1 or not a whole number → **422** |
 | `starting_after` | The `id` of the last item on the previous page. Not a lowercase ULID → **422** |
 | Answer | `{"tasks": [...], "has_more": false}`, in `id` order (oldest first) |
 
@@ -179,7 +184,7 @@ TASK_ASSIGNEE_PERMISSION=project:read bun run dev
 
 A `GET …/stats` for a project, end to end.
 
-**1. Add the handler.** A group in `src/Stats/Api.ts` on `/projects/:project_id/stats`, its handler in `src/Stats/Http.ts`, and both registered in `src/Api.ts` and `src/Http.ts` (copy `src/Tasks/`). Read `path.project_id`. Don't check who called: the front door did, and the path is the answer.
+**1. Add the handler.** A group in `src/Stats/Api.ts` on `/projects/:project_id/stats`, its handler in `src/Stats/Http.ts`, and both registered in `src/Api.ts` and `src/Http.ts` (copy `src/Tasks/`). Read `params.project_id`. Don't check who called: the front door did, and the path is the answer. Fail with the errors in `src/plat5/Errors.ts`, and list each one the endpoint answers as `error: [HttpErrors.NotFound, …]`. An endpoint with a query or a body gets `.middleware(Plat5Request)`, so what doesn't decode is Plat5's 400 or 422.
 
 **2. Route it.** Add it to `services/api.yml`, in the `project` scope. The path is relative to the project; `upstream_prefix` makes its upstream `/projects/{project.id}/stats`:
 
@@ -238,7 +243,7 @@ See `.env.example`. Bun loads `.env` automatically.
 | `OTEL_TRACES_EXPORTER` | `otlp` when endpoint set | Include `otlp` to push traces |
 | `OTEL_METRICS_EXPORTER` | `otlp` when endpoint set | Set `prometheus` to push-off; `/metrics` always on |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` (and `_TRACES_`, `_METRICS_`) | `http/protobuf` | The only one supported |
-| `OTEL_EXPORTER_OTLP_HEADERS` | unset | Headers on every export (e.g. a collector's auth) |
+| `OTEL_EXPORTER_OTLP_HEADERS` (and `_TRACES_`, `_METRICS_`) | unset | Headers on every export (e.g. a collector's auth), `key=value,…`; the signal's add to the base ones |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | ms (OTLP metrics only) |
 | `OTEL_TRACES_SAMPLER_RATIO` | `1` | Trace sampling ratio, `0` to `1`; parent-based |
 | `OTEL_SDK_DISABLED` | `false` | `true` → no OTLP; stdout + `/metrics` remain |
@@ -253,7 +258,7 @@ Contract: Plat5 [`docs/reference/telemetry.md`](https://github.com/plat5dev/plat
 |--------|------|
 | Logs | JSON stdout; access line per request, with `request_id`, and `node_id` and `member_id` on task routes or `user_id` on the profile ([logs](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#logs)) |
 | Metrics scrape | Prometheus `/metrics` on `INTERNAL_PORT` |
-| Traces | OTLP HTTP when endpoint set (default); W3C Trace Context only, `traceparent` in and on to identity; HTTP server spans as [the contract](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#http-server-spans) has them, `src/plat5/Redact.ts` redacting `url.query`; the same ids as `plat5.node_id`, `plat5.member_id`, `plat5.user_id` |
+| Traces | OTLP HTTP when endpoint set (default); W3C Trace Context, `traceparent` in, and on to identity from each call's client span; HTTP server spans as [the contract](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#http-server-spans) has them, `src/plat5/Redact.ts` redacting `url.query`; the same ids as `plat5.node_id`, `plat5.member_id`, `plat5.user_id` |
 | Metrics OTLP | On when endpoint set (default); set `OTEL_METRICS_EXPORTER=prometheus` to opt out |
 
 ```bash
@@ -275,18 +280,20 @@ Health and `/metrics` are on the internal server, with the tracer off.
 ```
 src/
   main.ts              # public + internal HTTP servers, SQL, the lifecycle reader
-  AppConfig.ts         # Effect Config
+  AppConfig.ts         # the app's settings
+  TelemetryConfig.ts   # the OTEL_* variables
   Api.ts / Http.ts     # HttpApi composition
   InternalHttp.ts      # health + /metrics on INTERNAL_PORT (tracer off)
   Sql.ts + migrations/ # SQLite + migrator
   Lifecycle.ts         # identity's lifecycle log: purged projects, deleted accounts
   Access.ts            # identity's access evaluation: assignees
-  Telemetry.ts         # OTel resource, scrape + optional OTLP, MetricsScrape
+  Telemetry.ts         # effect/observability: the /metrics scrape, OTLP traces and metrics, sampling, the log lines
   Version.ts           # service.version: the build's VERSION, written by the Dockerfile; dev without one
-  plat5/               # errors, request bodies, timestamps, audit details, pagination, HTTP/DB observability, url.query redaction
+  plat5/               # errors, how requests are read, ids, log lines, audit details, pagination, HTTP/DB observability, url.query redaction
   domain/              # Profile, Task models
   Profiles/ Tasks/     # the API: Api + Http + Repo + Service
   *.test.ts            # tests, beside what they test
+  testing.ts           # for tests: the config read from a map instead of the environment
 plat5.yml services/    # the deployment's config
 plat5.dev.yml          # plat5 start
 routes.operator.yml    # the operator plane's routes on this API

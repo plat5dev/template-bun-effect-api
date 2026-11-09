@@ -1,38 +1,40 @@
-import * as NodeSdk from "@effect/opentelemetry/NodeSdk"
-import {
-  HttpApi,
-  HttpApiBuilder,
-  HttpApiEndpoint,
-  HttpApiGroup,
-  HttpMiddleware,
-  HttpServer
-} from "@effect/platform"
 import { BunHttpServer } from "@effect/platform-bun"
-import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base"
 import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { Context, Effect, Exit, Layer, Scope } from "effect"
-import { NotFound, notFound, ServiceUnavailable, serviceUnavailable } from "./Errors.js"
-import { HttpServerSpanStatusLive, httpObservability } from "./HttpObservability.js"
+import { Context, Effect, Exit, Layer, Scope, Tracer } from "effect"
+import { HttpMiddleware, HttpRouter, HttpServer } from "effect/http"
+import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/http-api"
+import { HttpErrors, NotFound, ServiceUnavailable } from "./Errors.js"
+import { httpObservability } from "./HttpObservability.js"
 import { redactQuery } from "./Redact.js"
+import * as Log from "./Log.js"
+import { Plat5Request } from "./Request.js"
 
-class Boom extends HttpApiGroup.make("boom")
-  .add(HttpApiEndpoint.get("ok", "/ok"))
-  .add(HttpApiEndpoint.get("missing", "/missing").addError(NotFound, { status: 404 }))
-  .add(HttpApiEndpoint.get("die", "/die"))
-  .add(HttpApiEndpoint.get("unavailable", "/unavailable").addError(ServiceUnavailable))
-{}
+class Boom extends HttpApiGroup.make("boom").add(
+  HttpApiEndpoint.get("ok", "/ok"),
+  HttpApiEndpoint.get("missing", "/missing", { error: HttpErrors.NotFound }),
+  HttpApiEndpoint.get("die", "/die"),
+  HttpApiEndpoint.get("unavailable", "/unavailable", { error: HttpErrors.ServiceUnavailable })
+).middleware(Plat5Request) {}
 class TestApi extends HttpApi.make("test").add(Boom) {}
 
 const BoomLive = HttpApiBuilder.group(TestApi, "boom", (handlers) =>
   handlers
     .handle("ok", () => Effect.void)
-    .handle("missing", () => Effect.fail(notFound("node", "n1")))
+    .handle("missing", () => Effect.fail(new NotFound({ resource: "node", id: "n1" })))
     .handle("die", () => Effect.die(new Error("SQLITE_BUSY: database is locked at /data/app.db")))
-    .handle("unavailable", () => Effect.fail(serviceUnavailable())))
+    .handle("unavailable", () => Effect.fail(new ServiceUnavailable()))).pipe(Layer.provide(Plat5Request.layer))
 
 /** An API whose routes fail, behind the middleware, its spans recorded. */
 const serve = async () => {
-  const exporter = new InMemorySpanExporter()
+  // Every span, as Effect's own tracer makes it.
+  const recorded: Array<Tracer.Span> = []
+  const tracer = Tracer.make({
+    span: (options) => {
+      const span = Tracer.nativeTracer.span(options)
+      recorded.push(span)
+      return span
+    }
+  })
   const logs = spyOn(console, "log").mockImplementation(() => {})
   const scope = Effect.runSync(Scope.make())
   onTestFinished(async () => {
@@ -41,26 +43,31 @@ const serve = async () => {
   })
   const context = await Effect.runPromise(
     Layer.buildWithScope(
-      HttpApiBuilder.serve(httpObservability(TestApi)).pipe(
-        HttpMiddleware.withTracerDisabledWhen(() => true),
-        Layer.provide(HttpApiBuilder.api(TestApi).pipe(Layer.provide(BoomLive))),
+      HttpRouter.serve(HttpApiBuilder.layer(TestApi).pipe(Layer.provide(BoomLive)), {
+        middleware: httpObservability(TestApi),
+        disableLogger: true,
+        disableListenLog: true
+      }).pipe(
+        Layer.provide(Layer.succeed(HttpMiddleware.TracerDisabledWhen)(() => true)),
         Layer.provideMerge(BunHttpServer.layer({ port: 0, hostname: "127.0.0.1" })),
-        Layer.provide(HttpServerSpanStatusLive),
-        Layer.provide(NodeSdk.layer(() => ({
-          resource: { serviceName: "api" },
-          spanProcessor: new SimpleSpanProcessor(exporter)
-        })))
+        Layer.provide([Layer.succeed(Tracer.Tracer, tracer), Log.layer])
       ),
       scope
     )
   )
   const { address } = Context.get(context, HttpServer.HttpServer)
-  const base = `http://127.0.0.1:${address._tag === "TcpAddress" ? address.port : 0}`
+  const base = `http://127.0.0.1:${"port" in address ? address.port : 0}`
   const lines = () =>
     logs.mock.calls
       .map((call) => JSON.parse(String(call[0])) as Record<string, unknown>)
       .filter((line) => line.message === "request completed")
-  const spans = () => exporter.getFinishedSpans().filter((span) => span.kind === 1) // SERVER
+  const spans = () =>
+    recorded
+      .filter((span) => span.kind === "server" && span.status._tag === "Ended")
+      .map((span) => ({
+        attributes: Object.fromEntries(span.attributes),
+        failed: span.status._tag === "Ended" && Exit.isFailure(span.status.exit)
+      }))
   return { base, lines, spans }
 }
 
@@ -68,7 +75,7 @@ test("an unexpected error is the fallback 500, never its own text", async () => 
   const { base, lines } = await serve()
   const res = await fetch(`${base}/die`, { headers: { "x-request-id": "req-5" } })
   expect(res.status).toBe(500)
-  expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8")
+  expect(res.headers.get("content-type")).toBe("application/json")
   expect(await res.json()).toEqual({
     error: {
       type: "api_error",
@@ -123,10 +130,10 @@ test("the HTTP server span has url.scheme and the redacted url.query", async () 
   expect(span?.attributes["url.full"]).toBeUndefined()
 })
 
-test("a 2xx span's status is unset", async () => {
+test("a 2xx span isn't an error", async () => {
   const { base, spans } = await serve()
   await fetch(`${base}/ok`)
-  expect(spans()[0]?.status).toEqual({ code: 0 })
+  expect(spans()[0]?.failed).toBe(false)
 })
 
 test("a request without a query has no url.query", async () => {
@@ -145,11 +152,11 @@ test("error.type and error_type on a 5xx only", async () => {
   const [brokenLine, missingLine] = lines()
 
   expect(broken?.attributes["error.type"]).toBe("internal")
-  expect(broken?.status).toEqual({ code: 2 }) // ERROR, no description
+  expect(broken?.failed).toBe(true) // Error
   expect(brokenLine).toMatchObject({ error_type: "internal" })
   expect(brokenLine).not.toHaveProperty("error_kind")
 
   expect(missing?.attributes).not.toHaveProperty("error.type")
-  expect(missing?.status).toEqual({ code: 0 }) // UNSET
+  expect(missing?.failed).toBe(false) // never Error on a 4xx
   expect(missingLine).not.toHaveProperty("error_type")
 })

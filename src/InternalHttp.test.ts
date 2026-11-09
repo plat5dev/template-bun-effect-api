@@ -1,12 +1,13 @@
-import { HttpApp, HttpServer } from "@effect/platform"
 import { BunHttpServer } from "@effect/platform-bun"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/sql"
 import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { ConfigProvider, Context, Effect, Exit, Layer, Scope } from "effect"
+import { Context, Effect, Exit, Layer, Scope } from "effect"
+import { HttpRouter, HttpServer } from "effect/http"
 import { PublicApiLive } from "./Http.js"
-import { InternalApp } from "./InternalHttp.js"
+import { InternalRoutes } from "./InternalHttp.js"
 import { SqlLive } from "./Sql.js"
-import { MetricsScrape, TelemetryLive } from "./Telemetry.js"
+import { TelemetryLive } from "./Telemetry.js"
+import { envLayer } from "./testing.js"
 
 /** The public API on a port, and the internal app as a fetch handler beside it. */
 const serve = async () => {
@@ -25,18 +26,20 @@ const serve = async () => {
       ),
       scope
     ).pipe(
-      Effect.withConfigProvider(
-        ConfigProvider.fromMap(new Map([["DATABASE_PATH", ":memory:"], ["TASK_ASSIGNEE_PERMISSION", "x"]]))
+      Effect.provide(envLayer(new Map([["DATABASE_PATH", ":memory:"], ["TASK_ASSIGNEE_PERMISSION", "x"]]))
       )
     )
   )
   const { address } = Context.get(context, HttpServer.HttpServer)
-  const base = `http://127.0.0.1:${address._tag === "TcpAddress" ? address.port : 0}`
-  const runtime = await Effect.runPromise(
-    Effect.runtime<SqlClient.SqlClient | MetricsScrape>().pipe(Effect.provide(context))
-  )
-  const internal = HttpApp.toWebHandlerRuntime(runtime)(InternalApp)
-  return { base, internal: (path: string, method = "GET") => internal(new Request(`http://internal${path}`, { method })) }
+  const base = `http://127.0.0.1:${"port" in address ? address.port : 0}`
+  const internal = HttpRouter.toWebHandler(InternalRoutes, { disableLogger: true })
+  onTestFinished(() => internal.dispose())
+  const services = context as Context.Context<SqlClient.SqlClient>
+  return {
+    base,
+    internal: (path: string, method = "GET") =>
+      internal.handler(new Request(`http://internal${path}`, { method }), services)
+  }
 }
 
 test("health: live, and ready when the database answers", async () => {
@@ -44,7 +47,7 @@ test("health: live, and ready when the database answers", async () => {
   for (const path of ["/health/live", "/health/ready"]) {
     const res = await internal(path)
     expect(res.status).toBe(200)
-    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8")
+    expect(res.headers.get("content-type")).toBe("application/json")
     expect(await res.json()).toEqual({ status: "healthy" })
   }
 })

@@ -1,10 +1,11 @@
-import { HttpServer } from "@effect/platform"
 import { BunHttpServer } from "@effect/platform-bun"
 import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { ConfigProvider, Context, Effect, Exit, Layer, Scope } from "effect"
+import { Context, Effect, Exit, Layer, Scope } from "effect"
+import { HttpServer } from "effect/http"
 import { PublicApiLive } from "../Http.js"
 import { DETAILS_HEADER } from "../plat5/Audit.js"
 import { TelemetryLive } from "../Telemetry.js"
+import { envLayer } from "../testing.js"
 
 const user = "01jd8x3k7q00000000000000u1"
 const profilePath = `/users/${user}/profile`
@@ -26,13 +27,12 @@ const newApp = async () => {
       ),
       scope
     ).pipe(
-      Effect.withConfigProvider(
-        ConfigProvider.fromMap(new Map([["DATABASE_PATH", ":memory:"], ["TASK_ASSIGNEE_PERMISSION", "x"]]))
+      Effect.provide(envLayer(new Map([["DATABASE_PATH", ":memory:"], ["TASK_ASSIGNEE_PERMISSION", "x"]]))
       )
     )
   )
   const { address } = Context.get(context, HttpServer.HttpServer)
-  const base = `http://127.0.0.1:${address._tag === "TcpAddress" ? address.port : 0}`
+  const base = `http://127.0.0.1:${"port" in address ? address.port : 0}`
   return (method: "GET" | "PUT", body?: string, contentType: string | null = "application/json") =>
     fetch(`${base}${profilePath}`, {
       method,
@@ -51,9 +51,8 @@ const expectField = async (res: Response, path: string, message: string) => {
 
 test("bio: required, at most 2000 characters, kept as sent", async () => {
   const send = await newApp()
-  for (const body of [`{}`, `{"bio":null}`, `null`]) {
-    await expectField(await send("PUT", body), "bio", "Bio is required.")
-  }
+  await expectField(await send("PUT", `{}`), "bio", "Bio is required.")
+  await expectField(await send("PUT", `{"bio":null}`), "bio", FALLBACK)
   await expectField(await send("PUT", JSON.stringify({ bio: "é".repeat(2001) })), "bio", "Bio is too long.")
   for (const bio of ["😀".repeat(2000), "  spaced  ", ""]) {
     const res = await send("PUT", JSON.stringify({ bio }))
@@ -62,17 +61,20 @@ test("bio: required, at most 2000 characters, kept as sent", async () => {
   }
 })
 
-test("a profile body not sent as JSON, or of the wrong type, is a 422 at body", async () => {
+test("a profile body not sent as JSON, empty, or not JSON is a 400; of the wrong shape, a 422", async () => {
   const send = await newApp()
   for (const [body, contentType] of [
     [`{"bio":"hi"}`, null],
     [`{"bio":"hi"}`, "text/plain"],
     ["", "application/json"],
-    [`{"bio":5}`, "application/json"],
-    [`["hi"]`, "application/json"]
+    ["{", "application/json"]
   ] as const) {
-    await expectField(await send("PUT", body, contentType), "body", FALLBACK)
+    const res = await send("PUT", body, contentType)
+    expect(res.status, `${contentType} ${body}`).toBe(400)
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("INVALID_REQUEST")
   }
+  await expectField(await send("PUT", `{"bio":5}`), "bio", FALLBACK)
+  await expectField(await send("PUT", `["hi"]`), "body", FALLBACK)
   // Nothing was written: the profile is still new.
   const res = await send("GET")
   expect(((await res.json()) as { bio: string }).bio).toBe("")
@@ -111,5 +113,5 @@ test("PUT is 200 whether the profile is new or not, with the change audited", as
   expect(res.headers.get(DETAILS_HEADER)).toBe(`{"bio":{"from":"","to":"\\u003chi\\u003e"}}`)
   res = await send("PUT", `{"bio":"<hi>"}`)
   expect(res.headers.get(DETAILS_HEADER)).toBeNull()
-  expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8")
+  expect(res.headers.get("content-type")).toBe("application/json")
 })

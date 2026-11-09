@@ -1,69 +1,47 @@
-import {
-  HttpMiddleware,
-  HttpRouter,
-  HttpServer,
-  HttpServerRequest,
-  HttpServerResponse
-} from "@effect/platform"
 import { BunHttpServer } from "@effect/platform-bun"
-import { SqlClient } from "@effect/sql"
 import { Duration, Effect, Layer } from "effect"
+import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/http"
+import { SqlClient } from "effect/sql"
 import { AppConfig } from "./AppConfig.js"
-import { notFound } from "./plat5/Errors.js"
+import { errorResponse, NotFound } from "./plat5/Errors.js"
 import { SqlLive } from "./Sql.js"
-import { MetricsScrape } from "./Telemetry.js"
-
-const JSON_TYPE = "application/json; charset=utf-8"
+import { scrape } from "./Telemetry.js"
 
 const health = (status: number, word: "healthy" | "unhealthy") =>
-  HttpServerResponse.unsafeJson({ status: word }, { status, contentType: JSON_TYPE })
+  HttpServerResponse.jsonUnsafe({ status: word }, { status })
 
 /** Ready when the database answers, within 2 seconds. */
 const ready = Effect.gen(function*() {
   const sql = yield* SqlClient.SqlClient
   return yield* sql`SELECT 1`.pipe(
-    Effect.timeoutFail({ duration: Duration.seconds(2), onTimeout: () => "timeout" }),
+    Effect.timeout(Duration.seconds(2)),
     Effect.as(health(200, "healthy")),
     Effect.orElseSucceed(() => health(503, "unhealthy"))
   )
 })
 
-const metrics = Effect.gen(function*() {
-  const scrape = yield* MetricsScrape
-  const body = yield* scrape.collect
-  return HttpServerResponse.text(body, {
-    contentType: "text/plain; version=0.0.4; charset=utf-8"
-  })
-})
-
-/** Anything else, any method, is the 404 envelope. */
-const unknownRoute = Effect.gen(function*() {
-  const request = yield* HttpServerRequest.HttpServerRequest
-  const requestId = request.headers["x-request-id"] || null
-  return HttpServerResponse.unsafeJson(notFound("resource", null, requestId), {
-    status: 404,
-    contentType: JSON_TYPE
-  })
-})
-
-export const InternalApp = HttpRouter.empty.pipe(
-  HttpRouter.get("/health/live", Effect.succeed(health(200, "healthy"))),
-  HttpRouter.get("/health/ready", ready),
-  HttpRouter.get("/metrics", metrics),
-  Effect.catchTag("RouteNotFound", () => unknownRoute)
+const metrics = Effect.map(
+  scrape,
+  (body) => HttpServerResponse.text(body, { contentType: "text/plain; version=0.0.4; charset=utf-8" })
 )
 
-export const InternalHttpLive = Layer.unwrapEffect(
+/** Anything else, any method, is the 404 envelope. */
+const unknownRoute = errorResponse(new NotFound({ resource: "resource", id: null }), 404)
+
+/** The internal port's routes: health, readiness and the Prometheus scrape. */
+export const InternalRoutes = Layer.mergeAll(
+  HttpRouter.add("GET", "/health/live", health(200, "healthy")),
+  HttpRouter.add("GET", "/health/ready", ready),
+  HttpRouter.add("GET", "/metrics", metrics),
+  HttpRouter.add("*", "*", unknownRoute)
+)
+
+export const InternalHttpLive = Layer.unwrap(
   Effect.gen(function*() {
     const config = yield* AppConfig
-
-    return HttpServer.serve(InternalApp).pipe(
-      HttpMiddleware.withTracerDisabledForUrls([
-        "/health/live",
-        "/health/ready",
-        "/metrics"
-      ]),
+    return HttpRouter.serve(InternalRoutes, { disableLogger: true, disableListenLog: true }).pipe(
+      Layer.provide(HttpMiddleware.layerTracerDisabledForUrls(["/health/live", "/health/ready", "/metrics"])),
       Layer.provide(BunHttpServer.layer({ port: config.internalPort }))
     )
   })
-).pipe(Layer.provide(SqlLive), Layer.provide(AppConfig.Live))
+).pipe(Layer.provide(SqlLive), Layer.provide(AppConfig.layer))

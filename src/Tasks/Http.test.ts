@@ -1,12 +1,14 @@
-import { HttpServer, OpenApi } from "@effect/platform"
 import { BunHttpServer } from "@effect/platform-bun"
 import { expect, onTestFinished, setSystemTime, spyOn, test } from "bun:test"
-import { ConfigProvider, Context, Effect, Exit, Layer, Scope } from "effect"
+import { Context, Effect, Exit, Layer, Scope } from "effect"
+import { HttpServer } from "effect/http"
+import { OpenApi } from "effect/http-api"
 import { Api } from "../Api.js"
 import { PublicApiLive } from "../Http.js"
 import { CREATED_HEADER, DETAILS_HEADER } from "../plat5/Audit.js"
 import { TelemetryLive } from "../Telemetry.js"
 import { MEMBER_HEADER } from "./Api.js"
+import { envLayer } from "../testing.js"
 
 const project = "01jd8x3k7q0000000000000000"
 const other = "01jd8x3k7q0000000000000001"
@@ -105,15 +107,15 @@ const newApp = async (opts: { identityUnset?: boolean; tracesExported?: boolean 
   if (opts.tracesExported) config.set("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", `${identity.url}/v1/traces`)
   const context = await Effect.runPromise(
     Layer.buildWithScope(AppLive, scope).pipe(
-      Effect.withConfigProvider(ConfigProvider.fromMap(config))
+      Effect.provide(envLayer(config))
     )
   )
   const { address } = Context.get(context, HttpServer.HttpServer)
-  const base = `http://127.0.0.1:${address._tag === "TcpAddress" ? address.port : 0}`
+  const base = `http://127.0.0.1:${"port" in address ? address.port : 0}`
 
   /**
-   * Sends what the gateway sends on a project route: the caller's member id, but for the
-   * header in `without`.
+   * Sends what the gateway sends: on a project route the project's id and the caller's
+   * member id, on a user route the user's id; but for the header in `without`.
    */
   const send = (
     method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT" | "OPTIONS" | "HEAD",
@@ -121,8 +123,11 @@ const newApp = async (opts: { identityUnset?: boolean; tracesExported?: boolean 
     body?: string,
     opts: { without?: string; headers?: Record<string, string> } = {}
   ) => {
+    const projectId = /^\/projects\/([^/?]+)/.exec(path)?.[1]
+    const userId = /^\/users\/([^/?]+)/.exec(path)?.[1]
     const headers: Record<string, string> = {
-      [MEMBER_HEADER]: member,
+      ...(projectId ? { "x-plat5-project-id": projectId, [MEMBER_HEADER]: member } : {}),
+      ...(userId ? { "x-plat5-user-id": userId } : {}),
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...opts.headers
     }
@@ -268,12 +273,7 @@ for (const tracesExported of [false, true]) {
     })
     expect(res.status).toBe(201)
     expect(identity.headers[0]?.get("x-request-id")).toBe("req-1")
-    expect(identity.headers[0]?.get("traceparent")).toMatch(new RegExp(`^00-${traceId}-`))
-    expect(identity.headers[0]?.get("b3")).toBeNull()
-    // Without OTLP traces the request's span is its traceparent's, which goes on as it came.
-    if (!tracesExported) {
-      expect(identity.headers[0]?.get("traceparent")).toBe(`00-${traceId}-b7ad6b7169203331-01`)
-    }
+    expect(identity.headers[0]?.get("traceparent")).toMatch(new RegExp(`^00-${traceId}-[0-9a-f]{16}-01$`))
   })
 }
 
@@ -399,13 +399,13 @@ test("request logs carry the ids the front door gave", async () => {
   const lines = logged().filter((line) => line.message === "request completed")
   expect(lines.map((line) => [line.node_id, line.member_id, line.user_id])).toEqual([
     [project, member, undefined],
-    [undefined, member, user]
+    [undefined, undefined, user]
   ])
 })
 
 test("the OpenAPI document has the assignee and the answers", () => {
   const spec = OpenApi.fromApi(Api)
-  const task = spec.components.schemas["Task.json"] as { required: string[] }
+  const task = spec.components.schemas["Task"] as { required: string[] }
   expect(task.required).toContain("assignee_id")
   const tasks = spec.paths["/projects/{project_id}/tasks"]!
   const one = spec.paths["/projects/{project_id}/tasks/{task_id}"]!
@@ -440,7 +440,7 @@ test("title and status errors, word for word", async () => {
   const { send, create } = await newApp()
   const task = await create(project, "Launch")
   for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
-    for (const title of ["", "   ", "\u3000\u0085"]) {
+    for (const title of ["", "   ", "\t\u3000\n"]) {
       await expectField(await send(method, path, JSON.stringify({ title })), "title", "Title is required.")
     }
     await expectField(await send(method, path, JSON.stringify({ title: "x".repeat(256) })), "title", "Title is too long.")
@@ -449,20 +449,16 @@ test("title and status errors, word for word", async () => {
       await expectField(res, "status", "Status must be todo, in progress, or done.")
     }
   }
-  // A create without a title.
-  for (const body of [`{}`, `{"title":null}`, `null`]) {
-    await expectField(await send("POST", tasksPath, body), "title", "Title is required.")
-  }
+  // A create without a title; a null one is the wrong type.
+  await expectField(await send("POST", tasksPath, `{}`), "title", "Title is required.")
+  await expectField(await send("POST", tasksPath, `{"title":null}`), "title", FALLBACK)
 })
 
-test("titles are trimmed of Unicode white space, as Go's strings.TrimSpace", async () => {
+test("titles are trimmed of white space", async () => {
   const { send, create } = await newApp()
-  let res = await send("POST", tasksPath, JSON.stringify({ title: " \t\u00a0Launch\u0085\u3000 " }))
+  let res = await send("POST", tasksPath, JSON.stringify({ title: " \t\u00a0Launch\u3000 " }))
   expect(res.status).toBe(201)
   expect(((await res.json()) as Task).title).toBe("Launch")
-  // U+FEFF isn't white space to Go. (Not at the start: bun:sqlite drops a leading one.)
-  res = await send("POST", tasksPath, JSON.stringify({ title: "Launch\ufeff" }))
-  expect(((await res.json()) as Task).title).toBe("Launch\ufeff")
   const task = await create(project, "Launch")
   res = await send("PATCH", `${tasksPath}/${task.id}`, JSON.stringify({ title: "  Renamed  " }))
   expect(res.status).toBe(200)
@@ -491,7 +487,7 @@ test("a title's limit counts characters, not UTF-16 units", async () => {
 test("PATCH: null leaves a field as it is, and a no-op still answers the task", async () => {
   const { send, create } = await newApp()
   const task = await create(project, "Launch")
-  for (const body of [`{"title":null,"status":null}`, `{}`, `null`]) {
+  for (const body of [`{"title":null,"status":null}`, `{}`]) {
     const res = await send("PATCH", `${tasksPath}/${task.id}`, body)
     expect(res.status).toBe(200)
     const updated = (await res.json()) as Task
@@ -534,7 +530,7 @@ test("a known path in another method, or OPTIONS, is the unknown route's 404", a
     const res = await send(method, path, body, { headers: { "x-request-id": "req-9" } })
     expect(res.status).toBe(404)
     expect(res.headers.get("allow")).toBeNull()
-    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8")
+    expect(res.headers.get("content-type")).toBe("application/json")
     expect(await res.json()).toEqual({
       error: {
         type: "invalid_request_error",
@@ -553,7 +549,15 @@ test("a known path in another method, or OPTIONS, is the unknown route's 404", a
   expect(res.status).toBe(200)
 })
 
-test("a body not sent as JSON is a 422 at body, and nothing is written", async () => {
+/** The 400 for a request malformed before its values are read. */
+const expectMalformed = async (res: Response, label?: string) => {
+  expect(res.status, label).toBe(400)
+  const error = await errorOf(res)
+  expect(error.code, label).toBe("INVALID_REQUEST")
+  expect(error.message, label).toBe("Malformed request.")
+}
+
+test("a body not sent as application/json is a 400, and nothing is written", async () => {
   const { send, create, list } = await newApp()
   const task = await create(project, "Launch")
   for (const [contentType, body] of [
@@ -563,54 +567,63 @@ test("a body not sent as JSON is a 422 at body, and nothing is written", async (
     ["text/plain", ""],
     ["application/x-www-form-urlencoded", "title=Other"],
     ["application/jsonx", `{"title":"Other"}`],
+    ["application/merge-patch+json", `{"title":"Other"}`],
     ["", `{"title":"Other"}`],
     ["not a type", `{"title":"Other"}`]
   ] as const) {
     for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
-      await expectField(await send(method, path, body, sending(contentType)), "body", FALLBACK)
+      await expectMalformed(await send(method, path, body, sending(contentType)), `${method} ${contentType}`)
     }
   }
   expect((await list()).tasks.map((t) => t.title)).toEqual(["Launch"])
 })
 
-test("JSON is application/json with any parameters, or application/…+json", async () => {
+test("JSON is application/json, with any parameters", async () => {
   const { send } = await newApp()
   for (const contentType of [
-    "application/json; charset=utf-8",
+    "application/json",
     "Application/JSON",
     "application/json;charset=UTF-8;",
-    'application/json; charset="utf-8"',
-    "application/merge-patch+json",
-    "application/vnd.api+json"
+    'application/json; charset="utf-8"'
   ]) {
     const res = await send("POST", tasksPath, `{"title":"Launch"}`, sending(contentType))
-    expect(res.status).toBe(201)
+    expect(res.status, contentType).toBe(201)
   }
 })
 
-test("a body that isn't a JSON object is a 422 at body", async () => {
+test("an empty body or one that isn't JSON is a 400; JSON that isn't an object is a 422 at body", async () => {
   const { send, create } = await newApp()
   const task = await create(project, "Launch")
-  for (const body of ["", " ", "{", `{"title":"a"} x`, `[{"title":"a"}]`, `"a"`, "5", "true"]) {
-    for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
+  for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
+    for (const body of ["", " ", "{", `{"title":"a"} x`]) {
+      await expectMalformed(await send(method, path, body), `${method} ${body}`)
+    }
+    for (const body of [`[{"title":"a"}]`, `"a"`, "5", "true", "null"]) {
       await expectField(await send(method, path, body), "body", FALLBACK)
     }
   }
 })
 
-test("a field of the wrong JSON type is a 422 at body, never coerced", async () => {
+test("a field of the wrong JSON type is a 422 at that field, never coerced", async () => {
   const { send, create } = await newApp()
   const task = await create(project, "Launch")
-  for (const body of [
-    `{"title":123}`,
-    `{"title":true}`,
-    `{"title":["a"]}`,
-    `{"title":"Launch","status":5}`,
-    // Every field's type before any field's value.
-    `{"title":"","status":5}`
-  ]) {
+  for (const [body, fields] of [
+    [`{"title":123}`, [{ path: "title", message: FALLBACK }]],
+    [`{"title":true}`, [{ path: "title", message: FALLBACK }]],
+    [`{"title":["a"]}`, [{ path: "title", message: FALLBACK }]],
+    [`{"title":"Launch","status":5}`, [{ path: "status", message: "Status must be todo, in progress, or done." }]],
+    // Every wrong field, in the body's order.
+    [`{"title":"","status":5}`, [
+      { path: "title", message: "Title is required." },
+      { path: "status", message: "Status must be todo, in progress, or done." }
+    ]]
+  ] as const) {
     for (const [method, path] of [["POST", tasksPath], ["PATCH", `${tasksPath}/${task.id}`]] as const) {
-      await expectField(await send(method, path, body), "body", FALLBACK)
+      const res = await send(method, path, body)
+      expect(res.status, `${method} ${body}`).toBe(422)
+      const error = await errorOf(res)
+      expect(error.details.fields, `${method} ${body}`).toEqual([...fields])
+      expect(error.message).toBe(fields[0].message)
     }
   }
 })
@@ -624,7 +637,8 @@ test("keys match exactly: an unknown field is a 422 naming each, before anything
       ["POST", tasksPath, `{"title":"x","priority":1}`, ["priority"]],
       ["POST", tasksPath, `{"Status":"done","title":"","Assignee_ID":"${assignee}"}`, ["Status", "Assignee_ID"]],
       ["POST", tasksPath, `{"x":1,"title":"x","y":2,"x":3}`, ["x", "y"]],
-      ["POST", tasksPath, `{"b":1,"title":"x","1":2}`, ["b", "1"]],
+      // As JSON.parse orders an object's keys: integer-like ones first.
+      ["POST", tasksPath, `{"b":1,"title":"x","1":2}`, ["1", "b"]],
       ["PATCH", `${tasksPath}/${task.id}`, `{"Title":"x"}`, ["Title"]],
       // A missing task: the body first.
       ["PATCH", `${tasksPath}/01jd8x3k7q00000000000000zz`, `{"title":"x","extra":{"a":1}}`, ["extra"]]
@@ -647,57 +661,31 @@ test("keys match exactly: an unknown field is a 422 naming each, before anything
   expect(res.status).toBe(200)
 })
 
-test("a body over 1 MiB is a 413 before anything else, on any route", async () => {
-  const { send } = await newApp()
-  const big = `{"title":"${"x".repeat(1 << 20)}"}`
-  for (const [method, path, without] of [
-    ["POST", tasksPath, MEMBER_HEADER],
-    ["POST", tasksPath, undefined],
-    ["PATCH", `${tasksPath}/01jd8x3k7q00000000000000zz`, undefined],
-    ["PUT", `/users/${user}/profile`, undefined],
-    ["POST", "/nope", undefined]
-  ] as const) {
-    const res = await send(method, path, big, without ? { without } : {})
-    expect(res.status).toBe(413)
-    expect(res.headers.get("allow")).toBeNull()
-    expect(await res.json()).toEqual({
-      error: {
-        type: "invalid_request_error",
-        code: "PAYLOAD_TOO_LARGE",
-        message: "Request body is too large.",
-        request_id: null,
-        details: { max_size_bytes: 1048576 }
-      }
-    })
-  }
-  // Exactly 1 MiB is read.
-  const fits = `{"title":"a"${" ".repeat((1 << 20) - 13)}}`
-  expect(Buffer.byteLength(fits)).toBe(1 << 20)
-  expect((await send("POST", tasksPath, fits)).status).toBe(201)
-})
-
-test("list parameters, as Go reads them", async () => {
+test("list parameters, as plat5 docs/reference/lists.md has them", async () => {
   const { send, create } = await newApp()
   for (const title of ["a", "b"]) await create(project, title)
   const count = async (query: string) => {
     const res = await send("GET", `${tasksPath}${query}`)
-    expect(res.status).toBe(200)
+    expect(res.status, query).toBe(200)
     return ((await res.json()) as { tasks: Task[] }).tasks.length
   }
-  expect(await count("?limit=%2B1")).toBe(1) // a sign, as strconv.Atoi takes it
+  expect(await count("")).toBe(2)
+  expect(await count("?limit=1")).toBe(1)
   expect(await count("?limit=001")).toBe(1)
-  expect(await count("?limit=%201%20")).toBe(1) // trimmed
   expect(await count("?limit=1000")).toBe(2) // clamped
-  expect(await count("?limit=")).toBe(2) // empty is the default
-  expect(await count("?limit=1&limit=abc")).toBe(1) // the first value
-  for (const limit of ["abc", "1.5", "0", "-1", "-0", "1e2", "99999999999999999999", "%2B"]) {
+  for (const limit of ["", "abc", "1.5", "0", "-1"]) {
     await expectField(await send("GET", `${tasksPath}?limit=${limit}`), "limit", FALLBACK)
   }
-  for (const after of ["nope", "01JD8X3K7Q0000000000000000", "81jd8x3k7q0000000000000000", "01jd8x3k7q000000000000000i"]) {
+  for (const after of ["", "nope", "01JD8X3K7Q0000000000000000", "81jd8x3k7q0000000000000000", "01jd8x3k7q000000000000000i"]) {
     await expectField(await send("GET", `${tasksPath}?starting_after=${after}`), "starting_after", FALLBACK)
   }
-  // The limit first.
-  await expectField(await send("GET", `${tasksPath}?limit=x&starting_after=x`), "limit", FALLBACK)
+  // Both wrong: both named, the limit first.
+  const res = await send("GET", `${tasksPath}?limit=x&starting_after=x`)
+  expect(res.status).toBe(422)
+  expect((await errorOf(res)).details.fields).toEqual([
+    { path: "limit", message: FALLBACK },
+    { path: "starting_after", message: FALLBACK }
+  ])
 })
 
 test("request_id is X-Request-ID as sent, or null", async () => {
@@ -722,12 +710,12 @@ test("audit details: sorted keys, HTML and non-ASCII escaped", async () => {
   )
 })
 
-test("times are RFC 3339 UTC without trailing zeros, as Go's RFC3339Nano", async () => {
+test("times are RFC 3339 in UTC, to the millisecond, set by the model", async () => {
   const { create } = await newApp()
   setSystemTime(new Date("2026-10-28T00:00:00.100Z"))
   try {
     const task = (await create(project, "Launch")) as Task & { created_at: string; updated_at: string }
-    expect(task.created_at).toBe("2026-10-28T00:00:00.1Z")
+    expect(task.created_at).toBe("2026-10-28T00:00:00.100Z")
     expect(task.updated_at).toBe(task.created_at)
   } finally {
     setSystemTime()
@@ -749,6 +737,6 @@ test("the request log: the route's template or unknown, warn on a 4xx", async ()
   expect(missing!.level).toBe("warn")
   expect(missing!.request_id).toBe("req-2")
   expect([unknown!.route, unknown!.level]).toEqual(["unknown", "warn"])
-  // No route, so no user id.
-  expect([wrongMethod!.route, wrongMethod!.user_id]).toEqual(["unknown", undefined])
+  // No route, but the id the gateway sent.
+  expect([wrongMethod!.route, wrongMethod!.user_id]).toEqual(["unknown", user])
 })

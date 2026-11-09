@@ -6,9 +6,10 @@
  * docs/reference/api/internal.md#access-evaluation). Only a 200 with a boolean `decision`
  * is an answer. Anything else is `NoAnswer`, logged with the request id, and no answer is no.
  */
-import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest, HttpClientResponse } from "@effect/platform"
-import { Data, Duration, Effect, Schema } from "effect"
+import { Context, Duration, Effect, Layer, Schema } from "effect"
+import { FetchHttpClient, HttpBody, HttpClient, HttpIncomingMessage } from "effect/http"
 import { AppConfig } from "./AppConfig.js"
+import { currentRequestId } from "./plat5/RequestId.js"
 
 /** Whether the member `memberId` holds `permission` on the node `nodeId` of kind `kind`. */
 export type Question = {
@@ -19,73 +20,55 @@ export type Question = {
 }
 
 /** Identity gave no answer: anything but a 200 with a boolean `decision`. */
-export class NoAnswer extends Data.TaggedError("NoAnswer")<{ readonly message: string }> {}
+export class NoAnswer extends Schema.TaggedError<NoAnswer>()("NoAnswer", { message: Schema.String }) {}
 
 const Answer = Schema.Struct({ decision: Schema.Boolean })
 
-export class Access extends Effect.Service<Access>()("Access", {
-  effect: Effect.gen(function*() {
+export class Access extends Context.Service<Access>()("api/Access", {
+  make: Effect.gen(function*() {
     const config = yield* AppConfig
-    // No span of its own: the request's span goes on to identity as traceparent, and
-    // nothing else (W3C Trace Context only, plat5 docs/reference/telemetry.md#traces).
+    // Each call is a client span, its trace going on to identity as traceparent.
     const client = (yield* HttpClient.HttpClient).pipe(
-      HttpClient.withTracerDisabledWhen(() => true),
-      HttpClient.mapRequestEffect((request) =>
-        Effect.map(Effect.option(Effect.currentParentSpan), (span) =>
-          // A span with no trace (all zeros) when OTLP traces are off and none came in.
-          span._tag === "Some" && !/^0+$/.test(span.value.traceId)
-            ? HttpClientRequest.setHeader(
-              request,
-              "traceparent",
-              `00-${span.value.traceId}-${span.value.spanId}-${span.value.sampled ? "01" : "00"}`
-            )
-            : request
-        )
-      ),
       HttpClient.filterStatus((status) => status === 200)
     )
 
-    const ask = (q: Question, requestId: string) =>
+    const ask = (q: Question, requestId: string | null) =>
       config.identityInternalUrl === undefined
         ? Effect.fail(new NoAnswer({ message: "IDENTITY_INTERNAL_URL is unset" }))
         : client.post(`${config.identityInternalUrl}/access/v1/evaluation`, {
-          headers: { "x-request-id": requestId },
-          body: HttpBody.unsafeJson({
+          headers: requestId === null ? {} : { "x-request-id": requestId },
+          body: HttpBody.jsonUnsafe({
             subject: { type: "member", id: q.memberId },
             resource: { type: q.kind, id: q.nodeId },
             action: { name: q.permission }
           })
         }).pipe(
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(Answer)),
-          Effect.scoped,
+          Effect.flatMap(HttpIncomingMessage.schemaBodyJson(Answer)),
           Effect.timeout(Duration.seconds(10)),
           Effect.map((answer) => answer.decision),
           Effect.mapError((err) => new NoAnswer({ message: err.message }))
         )
 
     /**
-     * Identity's decision. `requestId` is the request's `X-Request-ID`: sent to identity,
-     * and logged with a failure.
+     * Identity's decision. The current request's `X-Request-ID` goes to identity with it, and
+     * is logged with a failure.
      */
-    const evaluate = (question: Question, requestId: string): Effect.Effect<boolean, NoAnswer> =>
-      ask(question, requestId).pipe(
+    const evaluate = Effect.fnUntraced(function*(question: Question) {
+      const requestId = yield* currentRequestId
+      return yield* ask(question, requestId).pipe(
         Effect.tapError((err) =>
-          Effect.sync(() =>
-            console.log(
-              JSON.stringify({
-                timestamp: new Date().toISOString(),
-                level: "error",
-                message: "access evaluation failed",
-                component: "access",
-                request_id: requestId,
-                error_message: err.message
-              })
-            )
+          Effect.logError("access evaluation failed").pipe(
+            Effect.annotateLogs({ component: "access", request_id: requestId ?? "", error_message: err.message })
           )
         )
       )
+    })
 
     return { evaluate } as const
-  }),
-  dependencies: [AppConfig.Live, FetchHttpClient.layer]
-}) {}
+  })
+}) {
+  static readonly layerNoDeps = Layer.effect(this, this.make)
+  static readonly layer = this.layerNoDeps.pipe(
+    Layer.provide([AppConfig.layer, FetchHttpClient.layer])
+  )
+}

@@ -1,13 +1,15 @@
-import { FetchHttpClient } from "@effect/platform"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/sql"
 import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { ConfigProvider, Duration, Effect, Exit, Fiber, Layer, Option, Scope } from "effect"
+import { Duration, Effect, Exit, Fiber, Layer, Option, Schema, Scope } from "effect"
+import { FetchHttpClient } from "effect/http"
 import { Profile } from "./domain/Profile.js"
 import { Task, TaskId } from "./domain/Task.js"
-import { consumer, decodePage, type Event, TYPES } from "./Lifecycle.js"
+import { type Event, Lifecycle, Page, TYPES } from "./Lifecycle.js"
 import { ProfilesRepo } from "./Profiles/Repo.js"
 import { SqlLive } from "./Sql.js"
 import { TasksRepo } from "./Tasks/Repo.js"
+import { envLayer } from "./testing.js"
+import * as Log from "./plat5/Log.js"
 
 const purged = "01jd8x3k7q0000000000000001"
 const kept = "01jd8x3k7q0000000000000002"
@@ -99,9 +101,9 @@ const serveIdentity = (events: Served[] = []) => {
 
 type Identity = ReturnType<typeof serveIdentity>
 
-const StoresLive = Layer.mergeAll(SqlLive, TasksRepo.Default, ProfilesRepo.Default, FetchHttpClient.layer)
+const StoresLive = Layer.mergeAll(SqlLive, TasksRepo.layer, ProfilesRepo.layer, FetchHttpClient.layer, Log.layer)
 
-const setup = async (identity: Identity, retry: Duration.DurationInput = Duration.millis(10)) => {
+const setup = async (identity: Identity, retry: Duration.Input = Duration.millis(10)) => {
   // The consumer's lines, to read and to keep out of the test output.
   const logs = spyOn(console, "log").mockImplementation(() => {})
   onTestFinished(() => logs.mockRestore())
@@ -109,8 +111,7 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
   onTestFinished(() => Effect.runPromise(Scope.close(scope, Exit.void)))
   const context = await Effect.runPromise(
     Layer.buildWithScope(StoresLive, scope).pipe(
-      Effect.withConfigProvider(
-        ConfigProvider.fromMap(
+      Effect.provide(envLayer(
           new Map([["DATABASE_PATH", ":memory:"], ["TASK_ASSIGNEE_PERMISSION", "project:read"]])
         )
       )
@@ -119,20 +120,18 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
   const exec = <A, E>(
     effect: Effect.Effect<A, E, SqlClient.SqlClient | TasksRepo | ProfilesRepo>
   ) => Effect.runPromise(Effect.provide(effect, context))
-  const c = await exec(consumer(identity.url, retry).pipe(Effect.provide(context)))
+  const c = await exec(Lifecycle.make(identity.url, retry).pipe(Effect.provide(context)))
 
   const addTask = (id: string, projectId: string) =>
     exec(Effect.flatMap(TasksRepo, (tasks) =>
-      tasks.insert(Task.insert.make({
+      Task.insert.makeEffect({
         id: TaskId.make(id),
         project_id: projectId,
         title: "t",
         status: "todo",
         assignee_id: null,
-        created_by: "01jd8x3k7q00000000000000mm",
-        created_at: "now",
-        updated_at: "now"
-      }))))
+        created_by: "01jd8x3k7q00000000000000mm"
+      }).pipe(Effect.orDie, Effect.flatMap(tasks.insert))))
   const count = (projectId: string) =>
     exec(Effect.flatMap(TasksRepo, (tasks) =>
       tasks.listByProject(projectId, { limit: 100, startingAfter: "" }).pipe(
@@ -140,9 +139,7 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
       )))
   const addProfile = (userId: string) =>
     exec(Effect.flatMap(ProfilesRepo, (profiles) =>
-      profiles.insert(
-        Profile.insert.make({ user_id: userId, bio: "hi", created_at: "now", updated_at: "now" })
-      )))
+      Profile.insert.makeEffect({ user_id: userId, bio: "hi" }).pipe(Effect.orDie, Effect.flatMap(profiles.upsert))))
   const hasProfile = (userId: string) =>
     exec(Effect.flatMap(ProfilesRepo, (profiles) =>
       profiles.findByUserId(userId).pipe(Effect.map(Option.isSome))))
@@ -168,7 +165,7 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
 
   /** Forks the consumer's run; `stop` interrupts it, failing unless it ends within 2 s. */
   const start = () => {
-    const fiber = Effect.runFork(c.run)
+    const fiber = Effect.runFork(c.run.pipe(Effect.provide(Log.layer)))
     const stop = async () => {
       const ended = await Effect.runPromise(
         Fiber.interrupt(fiber).pipe(Effect.timeoutOption(Duration.seconds(2)))
@@ -193,9 +190,9 @@ const setup = async (identity: Identity, retry: Duration.DurationInput = Duratio
   }
 
   return {
-    step: () => Effect.runPromise(c.step),
-    stepExit: () => Effect.runPromiseExit(c.step),
-    run: c.run,
+    step: () => Effect.runPromise(c.step.pipe(Effect.provide(Log.layer))),
+    stepExit: () => Effect.runPromiseExit(c.step.pipe(Effect.provide(Log.layer))),
+    run: c.run.pipe(Effect.provide(Log.layer)),
     cursor: () => Effect.runPromise(c.cursor),
     start,
     runUntil,
@@ -346,17 +343,13 @@ test("a page commits with its cursor", async () => {
   expect(await s.cursor()).toBe("")
 })
 
-test("a page as Go decodes it", () => {
-  expect(decodePage({ events: [] })).toEqual([])
-  const events = decodePage({
-    events: [{ id: "7", Type: "node.purged", kind: null, extra: 1 }, null],
-    has_more: "ignored"
-  })
-  expect(events).toEqual([
-    { id: "7", type: "node.purged", kind: "", node_id: "", user_id: "" },
-    { id: "", type: "", kind: "", node_id: "", user_id: "" }
-  ])
-  for (const page of [[], null, {}, { events: null }, { events: {} }, { events: [{ id: 7 }] }, { events: ["x"] }]) {
-    expect(() => decodePage(page)).toThrow()
+test("a page decodes as the internal API writes it: its events, an absent or null field none", () => {
+  const decode = (page: unknown) => Effect.runSyncExit(Schema.decodeUnknownEffect(Page)(page))
+  expect(decode({ events: [] })).toEqual(Exit.succeed({ events: [] }))
+  expect(decode({ events: [{ id: "7", type: "node.purged", kind: null, extra: 1 }], has_more: false })).toEqual(
+    Exit.succeed({ events: [{ id: "7", type: "node.purged", kind: null }] })
+  )
+  for (const page of [[], null, {}, { events: null }, { events: {} }, { events: [{ id: 7, type: "x" }] }, { events: [null] }]) {
+    expect(Exit.isFailure(decode(page))).toBe(true)
   }
 })

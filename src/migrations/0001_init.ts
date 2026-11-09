@@ -1,4 +1,4 @@
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/sql"
 import { Effect } from "effect"
 
 export default Effect.gen(function*() {

@@ -1,34 +1,29 @@
-import type { Meter } from "@opentelemetry/api"
+/** The minimum process metrics (plat5 docs/reference/telemetry.md#process-metrics-minimum), as Effect metrics. */
+import { Effect, Metric } from "effect"
 
-/** Minimum process metrics per plat5 docs/reference/telemetry.md, on `meter`. */
-export const registerProcessMetrics = (meter: Meter): void => {
-  const startTime = Date.now() / 1000 - process.uptime()
+const residentMemory = Metric.gauge("process_resident_memory_bytes", { description: "Resident memory size in bytes" })
 
-  meter
-    .createObservableGauge("process_resident_memory_bytes", {
-      description: "Resident memory size in bytes",
-      unit: "By"
-    })
-    .addCallback((result) => {
-      result.observe(process.memoryUsage().rss)
-    })
+const cpuSeconds = Metric.counter("process_cpu_seconds_total", {
+  description: "Total user and system CPU time spent in seconds",
+  incremental: true
+})
 
-  meter
-    .createObservableCounter("process_cpu_seconds_total", {
-      description: "Total user and system CPU time spent in seconds",
-      unit: "s"
-    })
-    .addCallback((result) => {
-      const usage = process.cpuUsage()
-      result.observe((usage.user + usage.system) / 1_000_000)
-    })
+const startTime = Metric.gauge("process_start_time_seconds", {
+  description: "Start time of the process since unix epoch in seconds"
+})
 
-  meter
-    .createObservableGauge("process_start_time_seconds", {
-      description: "Start time of the process since unix epoch in seconds",
-      unit: "s"
-    })
-    .addCallback((result) => {
-      result.observe(startTime)
-    })
-}
+const startedAt = Date.now() / 1000 - process.uptime()
+let cpuCounted = 0
+
+/** Brings the process metrics up to now: before a scrape, and on a timer for OTLP. */
+export const updateProcessMetrics: Effect.Effect<void> = Effect.suspend(() => {
+  const usage = process.cpuUsage()
+  const cpu = (usage.user + usage.system) / 1_000_000
+  const delta = cpu - cpuCounted
+  cpuCounted = cpu
+  return Effect.all([
+    Metric.update(residentMemory, process.memoryUsage().rss),
+    Metric.update(cpuSeconds, delta),
+    Metric.update(startTime, startedAt)
+  ], { discard: true })
+})

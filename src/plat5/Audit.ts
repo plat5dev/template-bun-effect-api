@@ -10,10 +10,11 @@
  * A delete sends nothing: the route and its path say what happened. Never a secret.
  *
  * The headers are added to the current request's response with a pre-response handler, so
- * a service can call these where it has the old and new values in hand.
+ * a service can call these where it has the old and new values in hand. Outside a request
+ * they do nothing.
  */
-import { HttpApp, HttpServerResponse } from "@effect/platform"
-import { Clock, Effect } from "effect"
+import { Clock, Effect, Option } from "effect"
+import { HttpEffect, HttpServerRequest, HttpServerResponse } from "effect/http"
 
 export const DETAILS_HEADER = "X-Plat5-Audit-Details"
 export const CREATED_HEADER = "X-Plat5-Audit-Created"
@@ -48,9 +49,15 @@ export const encode = (details: Details): string | null => {
   return json.length > MAX_BYTES ? null : json
 }
 
-const setHeader = (name: string, value: string) =>
-  HttpApp.appendPreResponseHandler((_request, response) =>
-    Effect.succeed(HttpServerResponse.setHeader(response, name, value))
+const setHeader = (name: string, value: string): Effect.Effect<void> =>
+  Effect.serviceOption(HttpServerRequest.HttpServerRequest).pipe(
+    Effect.flatMap(Option.match({
+      onNone: () => Effect.void,
+      onSome: (request) =>
+        HttpEffect.appendPreResponseHandler((_request, response) =>
+          Effect.succeed(HttpServerResponse.setHeader(response, name, value))
+        ).pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, request))
+    }))
   )
 
 /**
@@ -62,14 +69,12 @@ export const setDetails = (details: Details): Effect.Effect<void> => {
   if (Object.keys(details).length === 0) return Effect.void
   const value = encode(details)
   if (value === null) {
-    return Effect.all([Effect.currentSpan, Clock.currentTimeNanos]).pipe(
-      Effect.tap(([span, at]) =>
-        span.event("audit details not sent", at, {
-          reason: `audit details are over ${MAX_BYTES} bytes`
-        })
-      ),
-      Effect.ignore
-    )
+    return Effect.gen(function*() {
+      const span = yield* Effect.currentSpan
+      span.event("audit details not sent", yield* Clock.currentTimeNanos, {
+        reason: `audit details are over ${MAX_BYTES} bytes`
+      })
+    }).pipe(Effect.ignore)
   }
   return setHeader(DETAILS_HEADER, value)
 }
