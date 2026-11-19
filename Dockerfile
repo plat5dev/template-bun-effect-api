@@ -5,14 +5,15 @@ FROM oven/bun:1.4 AS local
 
 WORKDIR /app
 
-# sqlite3, to look in the database or reset the lifecycle cursor (README).
+# sqlite3, to inspect the database or reset the lifecycle cursor.
 RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
-COPY . .
+COPY tsconfig.json ./
+COPY src ./src
 
 ENV PORT=3000
 ENV INTERNAL_PORT=3001
@@ -36,11 +37,10 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production \
   && chown -R app:app /app
 
-COPY --chown=app:app . .
+COPY --chown=app:app src ./src
 
-# The release this image reports as service.version; dev without one.
 ARG VERSION=dev
-RUN bun -e 'await Bun.write("src/Version.ts", `export const VERSION = ${JSON.stringify(process.env.VERSION)}\n`)'
+ENV APP_VERSION=${VERSION}
 
 USER app
 

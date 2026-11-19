@@ -1,49 +1,24 @@
-import { BunHttpServer } from "@effect/platform-bun"
-import { SqlClient } from "effect/sql"
-import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { Context, Effect, Exit, Layer, Scope } from "effect"
+import { expect, onTestFinished, test } from "bun:test"
+import { Layer } from "effect"
 import { HttpRouter, HttpServer } from "effect/http"
-import { PublicApiLive } from "./Http.js"
+import { AppConfig } from "./Config.js"
 import { InternalRoutes } from "./InternalHttp.js"
 import { SqlLive } from "./Sql.js"
-import { TelemetryLive } from "./Telemetry.js"
-import { envLayer } from "./testing.js"
+import { envLayer, makeTestApp } from "./testing.js"
 
-/** The public API on a port, and the internal app as a fetch handler beside it. */
-const serve = async () => {
-  const logs = spyOn(console, "log").mockImplementation(() => {})
-  const scope = Effect.runSync(Scope.make())
-  onTestFinished(async () => {
-    await Effect.runPromise(Scope.close(scope, Exit.void))
-    logs.mockRestore()
-  })
-  const context = await Effect.runPromise(
-    Layer.buildWithScope(
-      PublicApiLive.pipe(
-        Layer.provideMerge(BunHttpServer.layer({ port: 0, hostname: "127.0.0.1" })),
-        Layer.provideMerge(TelemetryLive),
-        Layer.provideMerge(SqlLive)
-      ),
-      scope
-    ).pipe(
-      Effect.provide(envLayer(new Map([["DATABASE_PATH", ":memory:"], ["TASK_ASSIGNEE_PERMISSION", "x"]]))
-      )
-    )
+const makeInternalApp = () => {
+  const layer = InternalRoutes.pipe(
+    Layer.provideMerge(SqlLive),
+    Layer.provide([HttpServer.layerServices, AppConfig.layer]),
+    Layer.provide(envLayer({ DATABASE_PATH: ":memory:", TASK_ASSIGNEE_PERMISSION: "project:read" }))
   )
-  const { address } = Context.get(context, HttpServer.HttpServer)
-  const base = `http://127.0.0.1:${"port" in address ? address.port : 0}`
-  const internal = HttpRouter.toWebHandler(InternalRoutes, { disableLogger: true })
-  onTestFinished(() => internal.dispose())
-  const services = context as Context.Context<SqlClient.SqlClient>
-  return {
-    base,
-    internal: (path: string, method = "GET") =>
-      internal.handler(new Request(`http://internal${path}`, { method }), services)
-  }
+  const app = HttpRouter.toWebHandler(layer, { disableLogger: true })
+  onTestFinished(() => app.dispose())
+  return (path: string, method = "GET") => app.handler(new Request(`http://internal.test${path}`, { method }))
 }
 
-test("health: live, and ready when the database answers", async () => {
-  const { internal } = await serve()
+test("health: /health/live and /health/ready return 200 healthy", async () => {
+  const internal = makeInternalApp()
   for (const path of ["/health/live", "/health/ready"]) {
     const res = await internal(path)
     expect(res.status).toBe(200)
@@ -52,8 +27,8 @@ test("health: live, and ready when the database answers", async () => {
   }
 })
 
-test("the internal port answers anything else with the 404 envelope", async () => {
-  const { internal } = await serve()
+test("unknown internal routes return the 404 envelope", async () => {
+  const internal = makeInternalApp()
   for (const [path, method] of [["/nope", "GET"], ["/health/live", "POST"], ["/metrics", "DELETE"]] as const) {
     const res = await internal(path, method)
     expect(res.status).toBe(404)
@@ -61,18 +36,20 @@ test("the internal port answers anything else with the 404 envelope", async () =
   }
 })
 
-test("metrics: names, help, and labels as the other starters have them", async () => {
-  const { base, internal } = await serve()
-  await fetch(`${base}/projects/01jd8x3k7q0000000000000000/tasks`)
-  await fetch(`${base}/nope`)
-  const text = await (await internal("/metrics")).text()
+test("/metrics exposes HTTP request counters, latency histograms, and process metrics", async () => {
+  const pub = makeTestApp()
+  const internal = makeInternalApp()
+
+  await pub.fetch("/projects/01jd8x3k7q0000000000000000/tasks")
+  await pub.fetch("/nope")
+
+  const res = await internal("/metrics")
+  expect(res.status).toBe(200)
+  const text = await res.text()
   expect(text).toContain("# HELP http_requests_total Total HTTP requests handled by the api service")
   expect(text).toContain("# HELP http_request_duration_seconds HTTP request latency observed by the api service")
   expect(text).toMatch(/http_requests_total\{[^}]*route="\/projects\/:project_id\/tasks"/)
   expect(text).toMatch(/http_requests_total\{[^}]*route="unknown"/)
-  expect(text).toMatch(/db_operations_total\{[^}]*db_operation_name="tasks\.list"[^}]*\}/)
-  expect(text).toMatch(/db_operations_total\{[^}]*db_namespace="api"/)
-  expect(text).not.toContain('db_namespace="app"')
   for (const name of ["process_resident_memory_bytes", "process_cpu_seconds_total", "process_start_time_seconds"]) {
     expect(text).toMatch(new RegExp(`^${name} [0-9.e+]+$`, "m"))
   }

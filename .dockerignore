@@ -1,6 +1,14 @@
 node_modules
 data
 .env
+.env.*
 .git
+.github
 *.md
 .DS_Store
+**/*.test.ts
+src/testing.ts
+plat5*.yml
+routes.operator.yml
+docker-compose.yml
+services

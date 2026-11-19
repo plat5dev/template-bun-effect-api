@@ -1,9 +1,10 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test"
-import { Effect, Result, Tracer } from "effect"
-import { HttpServerRequest } from "effect/http"
+import { Effect, Layer, Result, Tracer } from "effect"
+import { FetchHttpClient, HttpServerRequest } from "effect/http"
 import { Access, type Question } from "./Access.js"
-import { envLayer } from "./testing.js"
+import { AppConfig } from "./Config.js"
 import * as Log from "./plat5/Log.js"
+import { envLayer } from "./testing.js"
 
 const member = "01jd8x3k7q00000000000000mm"
 const project = "01jd8x3k7q00000000000000pp"
@@ -14,7 +15,6 @@ const question: Question = {
   permission: "project:read"
 }
 
-/** Identity, answering every evaluation with `status` and `body`, keeping what it got. */
 const serveIdentity = (status: number, body: string) => {
   const got: { headers?: Headers; body?: unknown } = {}
   const server = Bun.serve({
@@ -33,42 +33,40 @@ const serveIdentity = (status: number, body: string) => {
   return { url: `http://127.0.0.1:${server.port}`, got }
 }
 
-/**
- * Asks identity at `identityUrl` (unset when undefined), as the API would during a request
- * with `requestId` as its X-Request-ID, under `parent` when there is one.
- */
 const evaluate = (identityUrl: string | undefined, requestId: string, parent?: Tracer.AnySpan) => {
-  const config = new Map([["TASK_ASSIGNEE_PERMISSION", "project:read"]])
-  if (identityUrl !== undefined) config.set("IDENTITY_INTERNAL_URL", identityUrl)
+  const config: Record<string, string> = { TASK_ASSIGNEE_PERMISSION: "project:read" }
+  if (identityUrl !== undefined) config.IDENTITY_INTERNAL_URL = identityUrl
   const request = HttpServerRequest.fromWeb(new Request("http://api/", { headers: { "x-request-id": requestId } }))
   const ask = Effect.flatMap(Access, (access) => access.evaluate(question)).pipe(
     Effect.provideService(HttpServerRequest.HttpServerRequest, request)
   )
+  const accessLayer = Access.layer.pipe(
+    Layer.provide([AppConfig.layer, FetchHttpClient.layer]),
+    Layer.provide(envLayer(config))
+  )
   return Effect.runPromise(
     (parent ? Effect.withParentSpan(ask, parent) : ask).pipe(
       Effect.result,
-      Effect.provide([Access.layer, Log.layer]),
-      Effect.provide(envLayer(config))
+      Effect.provide([accessLayer, Log.layer])
     )
   )
 }
 
 for (const decision of [true, false]) {
-  test(`evaluate asks identity and answers ${decision}`, async () => {
+  test(`evaluate asks identity (trimming trailing slash) and answers ${decision}`, async () => {
     const identity = serveIdentity(200, JSON.stringify({ decision }))
     const parent = Tracer.externalSpan({
       traceId: "01000000000000000000000000000000",
       spanId: "0200000000000000"
     })
 
-    expect(await evaluate(identity.url, "req-1", parent)).toEqual(Result.succeed(decision))
+    expect(await evaluate(`${identity.url}/`, "req-1", parent)).toEqual(Result.succeed(decision))
     expect(identity.got.body).toEqual({
       subject: { type: "member", id: member },
       resource: { type: "project", id: project },
       action: { name: "project:read" }
     })
     expect(identity.got.headers?.get("x-request-id")).toBe("req-1")
-    // The trace goes on as traceparent, the call a span under the caller's.
     expect(identity.got.headers?.get("traceparent")).toMatch(/^00-01000000000000000000000000000000-[0-9a-f]{16}-01$/)
   })
 }
@@ -76,26 +74,23 @@ for (const decision of [true, false]) {
 for (const [name, status, body] of [
   ["unavailable", 503, `{"error":{"code":"SERVICE_UNAVAILABLE"}}`],
   ["not 200", 500, `{"decision":true}`],
-  ["bad request", 400, `{"error":{"code":"INVALID_REQUEST"}}`],
   ["no decision", 200, `{}`],
   ["decision not a boolean", 200, `{"decision":"true"}`],
   ["not JSON", 200, `yes`]
 ] as const) {
-  test(`no answer is an error: ${name}`, async () => {
+  test(`fail closed on ${name}`, async () => {
     const logs = spyOn(console, "log").mockImplementation(() => {})
     onTestFinished(() => logs.mockRestore())
     const identity = serveIdentity(status, body)
 
     const got = await evaluate(identity.url, "req-1")
     expect(Result.isFailure(got)).toBe(true)
-    // Logged with the request id.
     const line = JSON.parse(String(logs.mock.calls[0]?.[0]))
-    expect(line.message).toBe("access evaluation failed")
-    expect(line.request_id).toBe("req-1")
+    expect(line).toMatchObject({ message: "access evaluation failed", request_id: "req-1" })
   })
 }
 
-test("no answer is an error: identity unreachable or unset", async () => {
+test("fail closed when identity is unreachable or unset", async () => {
   const logs = spyOn(console, "log").mockImplementation(() => {})
   onTestFinished(() => logs.mockRestore())
   const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() })

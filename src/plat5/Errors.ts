@@ -1,53 +1,39 @@
 /**
- * Plat5's errors (plat5 docs/reference/errors.md), and how the API answers with them.
- *
- * A service fails with one of the classes here: what went wrong, in Plat5's words, and
- * nothing about HTTP. `HttpErrors` are the same errors at the API's edge: each one's
- * endpoint answer, Plat5's envelope with its status. The envelope's `request_id` is the
- * request's `X-Request-ID`, filled in as the error is written, so nothing has to carry it.
+ * Plat5 error envelope, HTTP error schemas, and request decoding middleware.
  */
-import { Effect, Schema, SchemaGetter } from "effect"
-import { HttpServerResponse } from "effect/http"
-import { HttpApiSchema } from "effect/http-api"
-import { currentRequestId } from "./RequestId.js"
+import { Effect, Layer, Option, Schema, SchemaGetter, SchemaIssue } from "effect"
+import { HttpMethod, HttpServerRequest, HttpServerResponse } from "effect/http"
+import { HttpApiMiddleware, HttpApiSchema } from "effect/http-api"
 
-/** The 422 sentence when nothing more specific applies. */
-export const FALLBACK_VALIDATION = "That doesn't look right."
+export const currentRequestId: Effect.Effect<string | null> = Effect.map(
+  Effect.serviceOption(HttpServerRequest.HttpServerRequest),
+  Option.match({ onNone: () => null, onSome: (request) => request.headers["x-request-id"] || null })
+)
 
 const FieldIssue = Schema.Struct({ path: Schema.String, message: Schema.String })
 
-/** A 400: the request is malformed before its values are read. */
 export class InvalidRequest extends Schema.TaggedError<InvalidRequest>()("InvalidRequest", {}) {}
 
-/** A 422: the fields that are wrong, each with its sentence. */
 export class ValidationFailed extends Schema.TaggedError<ValidationFailed>()("ValidationFailed", {
   fields: Schema.Array(FieldIssue)
 }) {
-  /** One field wrong. No sentence is the fallback one. */
-  static field(path: string, message = FALLBACK_VALIDATION): ValidationFailed {
+  static field(path: string, message: string): ValidationFailed {
     return new ValidationFailed({ fields: [{ path, message }] })
   }
 }
 
-/** A 404: no `resource` by that id, or none the caller can reach. */
 export class NotFound extends Schema.TaggedError<NotFound>()("NotFound", {
   resource: Schema.String,
   id: Schema.NullOr(Schema.String)
 }) {}
 
-/** A 500. Its message is always the fallback sentence: never a framework's or a library's. */
 export class InternalError extends Schema.TaggedError<InternalError>()("InternalError", {}) {}
 
-/** A 503: a dependency, identity say, didn't answer. */
 export class ServiceUnavailable extends Schema.TaggedError<ServiceUnavailable>()("ServiceUnavailable", {}) {}
 
 const Plat5Error = Schema.Union([InvalidRequest, ValidationFailed, NotFound, InternalError, ServiceUnavailable])
-export type Plat5Error = typeof Plat5Error.Type
-
-/** An error's data, as its schema encodes it: its tag and its fields. */
 type ErrorData = typeof Plat5Error.Encoded
 
-/** Where each error sits in the envelope. */
 const describe = (e: ErrorData) => {
   switch (e._tag) {
     case "InvalidRequest":
@@ -56,7 +42,7 @@ const describe = (e: ErrorData) => {
       return {
         type: "invalid_request_error",
         code: "VALIDATION_ERROR",
-        message: e.fields[0]?.message ?? FALLBACK_VALIDATION,
+        message: e.fields[0]?.message ?? "Validation failed.",
         details: { fields: e.fields }
       }
     case "NotFound":
@@ -73,17 +59,14 @@ const describe = (e: ErrorData) => {
   }
 }
 
-/** The error as the API answers with it: Plat5's envelope, no framework `_tag`. */
 export const envelope = (error: ErrorData, requestId: string | null) => {
   const { code, details, message, type } = describe(error)
   return { error: { type, code, message, request_id: requestId, details } }
 }
 
-/** `error` as a response with `status`, for a route outside the API's endpoints. */
 export const errorResponse = (error: ErrorData, status: number) =>
   Effect.map(currentRequestId, (requestId) => HttpServerResponse.jsonUnsafe(envelope(error, requestId), { status }))
 
-/** The envelope's schema, for the OpenAPI document. */
 const Envelope = Schema.Struct({
   error: Schema.Struct({
     type: Schema.String,
@@ -94,12 +77,10 @@ const Envelope = Schema.Struct({
   })
 })
 
-/** An error's endpoint answer: the envelope with `status`, written with the request's id. */
 const answer = <S extends Schema.Top & { readonly Encoded: ErrorData }>(error: S, status: number) =>
   Envelope.pipe(
     Schema.decodeTo(error, {
-      // The API writes errors; it never reads one.
-      decode: SchemaGetter.forbidden(() => "an error envelope isn't read back"),
+      decode: SchemaGetter.forbidden(() => "Error envelope is encode-only"),
       encode: SchemaGetter.transformEffect((e: S["Encoded"]) =>
         Effect.map(currentRequestId, (requestId) => envelope(e, requestId))
       )
@@ -107,11 +88,91 @@ const answer = <S extends Schema.Top & { readonly Encoded: ErrorData }>(error: S
     HttpApiSchema.status(status)
   )
 
-/** Plat5's errors as endpoints answer with them: list each one an endpoint can answer. */
 export const HttpErrors = {
   InvalidRequest: answer(InvalidRequest, 400),
   ValidationFailed: answer(ValidationFailed, 422),
   NotFound: answer(NotFound, 404),
   InternalError: answer(InternalError, 500),
   ServiceUnavailable: answer(ServiceUnavailable, 503)
+}
+
+export const parseOptions = {
+  payload: { errors: "all", onExcessProperty: "error" },
+  query: { errors: "all" }
+} as const
+
+const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1()
+
+const formatPath = (path: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }> | undefined): string =>
+  (path ?? []).reduce<string>((out, segment) => {
+    const key = typeof segment === "object" ? segment.key : segment
+    return typeof key === "number" ? `${out}[${key}]` : out === "" ? String(key) : `${out}.${String(key)}`
+  }, "") || "body"
+
+/** Maps Effect's SchemaIssue into Plat5's `VALIDATION_ERROR` field list. */
+export const validationFailed = (issue: SchemaIssue.Issue): ValidationFailed => {
+  const seen = new Set<string>()
+  const fields: Array<{ readonly path: string; readonly message: string }> = []
+  for (const item of formatIssues(issue).issues) {
+    const path = formatPath(item.path)
+    if (seen.has(path)) continue
+    seen.add(path)
+    fields.push({ path, message: item.message })
+  }
+  return new ValidationFailed({ fields })
+}
+
+export const isJson = (contentType: string | undefined): boolean =>
+  contentType?.split(";")[0]?.trim().toLowerCase() === "application/json"
+
+/** Middleware for query-only endpoints (maps schema failures to 422). */
+export class Plat5Query extends HttpApiMiddleware.Service<Plat5Query>()("api/plat5/Plat5Query", {
+  error: HttpErrors.ValidationFailed
+}) {
+  static readonly layer = HttpApiMiddleware.layerSchemaErrorTransform(
+    Plat5Query,
+    (error) => Effect.fail(validationFailed(error.cause.issue))
+  )
+}
+
+/**
+ * Middleware for endpoints with JSON payloads or required headers:
+ * non-JSON content-type, missing headers, empty bodies, or bad JSON -> 400;
+ * schema validation issues -> 422.
+ */
+export class Plat5Request extends HttpApiMiddleware.Service<Plat5Request>()("api/plat5/Plat5Request", {
+  error: [HttpErrors.InvalidRequest, HttpErrors.ValidationFailed]
+}) {
+  static readonly layer = Layer.effect(
+    this,
+    Effect.map(this, (inner) => (httpEffect, options) =>
+      Effect.gen(function*() {
+        const request = yield* HttpServerRequest.HttpServerRequest
+        if (options.endpoint.payload.size > 0 && HttpMethod.hasBody(request.method)) {
+          if (!isJson(request.headers["content-type"])) return yield* new InvalidRequest()
+        }
+        return yield* inner(httpEffect, options)
+      })
+    )
+  ).pipe(
+    Layer.provide(
+      HttpApiMiddleware.layerSchemaErrorTransform(
+        this,
+        Effect.fnUntraced(function*(error) {
+          if (error.kind === "Headers") return yield* new InvalidRequest()
+          if (error.kind === "Payload") {
+            const issue = error.cause.issue
+            if (issue._tag === "InvalidValue" && issue.annotations?.message === "Expected a valid JSON body") {
+              return yield* new InvalidRequest()
+            }
+            const request = yield* HttpServerRequest.HttpServerRequest
+            if ((yield* Effect.orDie(request.text)).trim() === "") {
+              return yield* new InvalidRequest()
+            }
+          }
+          return yield* validationFailed(error.cause.issue)
+        })
+      )
+    )
+  )
 }

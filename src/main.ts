@@ -1,24 +1,32 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun"
 import { Effect, FileSystem, Layer, Path } from "effect"
-import { AppConfig } from "./AppConfig.js"
+import { FetchHttpClient } from "effect/http"
+import { Access } from "./Access.js"
+import { AppConfig } from "./Config.js"
 import { PublicHttpLive } from "./Http.js"
 import { InternalHttpLive } from "./InternalHttp.js"
 import { LifecycleLive } from "./Lifecycle.js"
 import * as Log from "./plat5/Log.js"
+import { Profiles, ProfilesRepo } from "./Profiles.js"
 import { SqlLive } from "./Sql.js"
+import { Tasks, TasksRepo } from "./Tasks.js"
 import { TelemetryLive } from "./Telemetry.js"
 
-/** The database's directory, made if it's missing. */
 const ensureDataDir = Effect.gen(function*() {
   const config = yield* AppConfig
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   yield* fs.makeDirectory(path.dirname(config.databasePath), { recursive: true })
-}).pipe(Effect.provide(BunServices.layer))
+})
+
+const ReposLive = Layer.mergeAll(TasksRepo.layer, ProfilesRepo.layer)
+const ServicesLive = Layer.mergeAll(Profiles.layer, Tasks.layer)
 
 const MainLive = Layer.mergeAll(PublicHttpLive, InternalHttpLive, LifecycleLive).pipe(
-  Layer.provide(SqlLive),
-  Layer.provide(TelemetryLive),
+  Layer.provide(ServicesLive),
+  Layer.provide(Layer.mergeAll(ReposLive, Access.layer)),
+  Layer.provide(Layer.mergeAll(SqlLive, TelemetryLive)),
+  Layer.provide(FetchHttpClient.layer),
   Layer.tap(() =>
     Effect.gen(function*() {
       const config = yield* AppConfig
@@ -29,12 +37,9 @@ const MainLive = Layer.mergeAll(PublicHttpLive, InternalHttpLive, LifecycleLive)
   )
 )
 
-// SIGINT or SIGTERM interrupts it (runMain): both servers shut down, and so does the
-// lifecycle reader, its read in flight cancelled. The reader ends before SQL closes, since
-// layers are released in reverse order.
 const program = ensureDataDir.pipe(
   Effect.andThen(Layer.launch(MainLive)),
-  Effect.provide([AppConfig.layer, Log.layer])
+  Effect.provide([AppConfig.layer, BunServices.layer, Log.layer])
 )
 
 BunRuntime.runMain(program)

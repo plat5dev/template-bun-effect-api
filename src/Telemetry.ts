@@ -1,22 +1,42 @@
 /**
- * Telemetry (plat5 docs/reference/telemetry.md), with Effect's own: logs as Plat5's JSON
- * lines, Effect's metrics on `/metrics` and, with a destination, pushed over OTLP, and spans
- * pushed over OTLP, sampled by OTEL_TRACES_SAMPLER_RATIO.
+ * Native Effect observability: Prometheus `/metrics` scrape, process metrics,
+ * and opt-in OTLP trace + metric push when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
  */
-import { Effect, Layer, Option, Schedule, Tracer } from "effect"
-import { FetchHttpClient, HttpClient } from "effect/http"
+import { Effect, Layer, Metric, Option, Schedule, Tracer } from "effect"
+import { HttpClient } from "effect/http"
 import { OtlpMetrics, OtlpSerialization, OtlpTracer, PrometheusMetrics } from "effect/observability"
+import { TelemetryConfig } from "./Config.js"
 import * as Log from "./plat5/Log.js"
-import { updateProcessMetrics } from "./plat5/ProcessMetrics.js"
-import { TelemetryConfig } from "./TelemetryConfig.js"
 
-/** The Prometheus text for `/metrics`: every Effect metric, the process ones brought up to now. */
+const residentMemory = Metric.gauge("process_resident_memory_bytes", {
+  description: "Resident memory size in bytes"
+})
+const cpuSeconds = Metric.counter("process_cpu_seconds_total", {
+  description: "Total user and system CPU time spent in seconds",
+  incremental: true
+})
+const startTime = Metric.gauge("process_start_time_seconds", {
+  description: "Start time of the process since unix epoch in seconds"
+})
+
+const startedAt = Date.now() / 1000 - process.uptime()
+let cpuCounted = 0
+
+export const updateProcessMetrics: Effect.Effect<void> = Effect.suspend(() => {
+  const usage = process.cpuUsage()
+  const cpu = (usage.user + usage.system) / 1_000_000
+  const delta = cpu - cpuCounted
+  cpuCounted = cpu
+  return Effect.all([
+    Metric.update(residentMemory, process.memoryUsage().rss),
+    Metric.update(cpuSeconds, delta),
+    Metric.update(startTime, startedAt)
+  ], { discard: true })
+})
+
+/** Prometheus text for `/metrics`, refreshing process gauges on scrape. */
 export const scrape: Effect.Effect<string> = Effect.andThen(updateProcessMetrics, PrometheusMetrics.format())
 
-/**
- * The client the OTLP exporters send with. An export that fails, the collector unreachable
- * say, is one JSON `error` line each time; the API keeps serving.
- */
 const ExportClient = Layer.effect(
   HttpClient.HttpClient,
   Effect.map(HttpClient.HttpClient, (client) =>
@@ -30,9 +50,8 @@ const ExportClient = Layer.effect(
         Effect.tapError((error) => Log.telemetryError(error.message))
       ))
   )
-).pipe(Layer.provide(FetchHttpClient.layer))
+)
 
-/** New traces are sampled at `ratio`; a span with a parent is sampled as its parent is. */
 const sampledAt = (ratio: number) =>
   Layer.effect(
     Tracer.Tracer,
@@ -45,6 +64,11 @@ const sampledAt = (ratio: number) =>
     )
   )
 
+/**
+ * Installs OTLP trace and metric exporters when configured.
+ * Process metrics run on a background interval only when OTLP metrics push is active;
+ * `/metrics` scrapes always refresh process metrics on demand.
+ */
 export const TelemetryLive = Layer.unwrap(
   Effect.gen(function*() {
     const config = yield* TelemetryConfig
@@ -57,23 +81,26 @@ export const TelemetryLive = Layer.unwrap(
         sampledAt(config.tracesSamplerRatio),
         OtlpTracer.layer({ url: config.otlpTracesUrl, resource, headers: config.otlpTracesHeaders })
       )
+
     const metrics = config.otlpMetricsUrl === undefined
       ? Layer.empty
-      : OtlpMetrics.layer({
-        url: config.otlpMetricsUrl,
-        resource,
-        headers: config.otlpMetricsHeaders,
-        exportInterval: config.metricExportIntervalMs
-      })
-    // OTLP gets the process metrics as they move; a scrape brings them up to date itself.
-    const processMetrics = Layer.effectDiscard(
-      updateProcessMetrics.pipe(Effect.repeat(Schedule.spaced(config.metricExportIntervalMs)), Effect.forkScoped)
-    )
+      : Layer.mergeAll(
+        OtlpMetrics.layer({
+          url: config.otlpMetricsUrl,
+          resource,
+          headers: config.otlpMetricsHeaders,
+          exportInterval: config.metricExportIntervalMs
+        }),
+        Layer.effectDiscard(
+          updateProcessMetrics.pipe(
+            Effect.repeat(Schedule.spaced(config.metricExportIntervalMs)),
+            Effect.forkScoped
+          )
+        )
+      )
 
-    const exporters = Layer.mergeAll(traces, metrics, processMetrics).pipe(
-      Layer.provide([OtlpSerialization.layerProtobuf, ExportClient, Log.layer])
+    return Layer.mergeAll(traces, metrics).pipe(
+      Layer.provide([OtlpSerialization.layerProtobuf, ExportClient])
     )
-    // The app's logs, and the exporters' own, are Plat5's lines.
-    return Layer.merge(exporters, Log.layer)
   })
 )

@@ -12,6 +12,7 @@ operator_routes: ./routes.operator.yml
 
 substitute:
   - package.json
+  - bun.lock
 
 # plat5 init copies this starter into a project's api/ folder. plat5 start
 # runs the API from this compose file.

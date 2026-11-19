@@ -1,34 +1,21 @@
 /**
- * Follows identity's lifecycle log, so the API's data goes when its project or its
- * person does (plat5 docs/concepts/lifecycle.md#following-the-log).
- *
- * It asks only for the two events it acts on. `node.purged` for a project deletes that
- * project's tasks; a purged organization's projects are purged with it, each with its own
- * event. `user.deleted` deletes that person's profile. Tasks are authored, so
- * `member.removed` keeps them. One cursor, the last event id acted on, is kept in SQLite
- * with the data it cleans up, and saved in the same transaction as a page's deletes. Acting
- * again on the same event changes nothing, so the log can be replayed by resetting it.
+ * Identity lifecycle log consumer (`GET {IDENTITY_INTERNAL_URL}/internal/events`).
+ * Deletes a purged project's tasks and a deleted user's profile atomically with `feed_cursors`.
  */
-import { Context, Duration, Effect, Layer, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientResponse, HttpIncomingMessage } from "effect/http"
+import { Duration, Effect, Layer, Schedule, Schema } from "effect"
+import { HttpClient, HttpClientResponse, HttpIncomingMessage } from "effect/http"
 import { SqlClient } from "effect/sql"
-import { AppConfig } from "./AppConfig.js"
-import { trackDb } from "./plat5/DbMetrics.js"
-import { ProfilesRepo } from "./Profiles/Repo.js"
-import { SqlLive } from "./Sql.js"
-import { TasksRepo } from "./Tasks/Repo.js"
+import { AppConfig } from "./Config.js"
+import { ProfilesRepo } from "./Profiles.js"
+import { TasksRepo } from "./Tasks.js"
 
-/** The events the API acts on, and the only ones it asks for. */
 export const TYPES = "node.purged,user.deleted"
-/** The wait after a failed read before asking again. */
 export const RETRY_AFTER = Duration.seconds(5)
-/** Identity waits up to 25 s before a 204, so a read may take that long. */
 const REQUEST_TIMEOUT = Duration.seconds(40)
 const PAGE_SIZE = 100
 
 const OptionalText = Schema.optionalKey(Schema.NullOr(Schema.String))
 
-/** The part of an event the API reads (plat5 docs/reference/api/internal.md#lifecycle-events). */
 export const Event = Schema.Struct({
   id: Schema.String,
   type: Schema.String,
@@ -38,155 +25,130 @@ export const Event = Schema.Struct({
 })
 export type Event = typeof Event.Type
 
-/** A page of the log: its events. */
 export const Page = Schema.Struct({ events: Schema.Array(Event) })
 
-/** Reading or acting on the log failed: logged, and asked again later. */
+const ConflictBody = Schema.Struct({
+  error: Schema.Struct({ code: Schema.String })
+})
+
 export class LifecycleError extends Schema.TaggedError<LifecycleError>()("LifecycleError", {
   message: Schema.String
 }) {}
 
 const logAt = { info: Effect.logInfo, warn: Effect.logWarning, error: Effect.logError } as const
 
-/** A lifecycle line: `component: lifecycle`, then `fields`. */
 const log = (level: keyof typeof logAt, message: string, fields: Record<string, unknown> = {}) =>
   logAt[level](message).pipe(Effect.annotateLogs({ component: "lifecycle", ...fields }))
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
-/**
- * The log's reader, on `identityUrl`, identity's internal base URL. `retry` is the wait after
- * an error.
- */
-export class Lifecycle extends Context.Service<Lifecycle>()("api/Lifecycle", {
-  make: Effect.fnUntraced(function*(identityUrl: string, retry: Duration.Input = RETRY_AFTER) {
-    const sql = yield* SqlClient.SqlClient
-    const tasks = yield* TasksRepo
-    const profiles = yield* ProfilesRepo
-    // A read held open for up to 25 s isn't a request worth a trace.
-    const client = HttpClient.transform(
-      yield* HttpClient.HttpClient,
-      (effect) => Effect.provideService(effect, HttpClient.TracerDisabledWhen, () => true)
-    )
-    const url = `${identityUrl}/internal/events`
+export const makeLifecycle = Effect.fnUntraced(function*(
+  identityUrl: string,
+  retry: Duration.Input = RETRY_AFTER
+) {
+  const sql = yield* SqlClient.SqlClient
+  const tasks = yield* TasksRepo
+  const profiles = yield* ProfilesRepo
+  const client = HttpClient.transform(
+    yield* HttpClient.HttpClient,
+    (effect) => Effect.provideService(effect, HttpClient.TracerDisabledWhen, () => true)
+  )
+  const url = `${identityUrl.replace(/\/+$/, "")}/internal/events`
 
-    /** The last event id acted on, or "" before the first. */
-    const cursor = sql<{ event_id: string }>`SELECT event_id FROM feed_cursors WHERE id = 1`.pipe(
-      Effect.map((rows) => rows[0]?.event_id ?? ""),
-      trackDb("feed_cursors.find")
-    )
+  const cursor = sql<{ event_id: string }>`SELECT event_id FROM feed_cursors WHERE id = 1`.pipe(
+    Effect.map((rows) => rows[0]?.event_id ?? "")
+  )
 
-    const saveCursor = (eventId: string) =>
-      sql`
-        INSERT INTO feed_cursors (id, event_id) VALUES (1, ${eventId})
-        ON CONFLICT (id) DO UPDATE SET event_id = excluded.event_id
-      `.pipe(Effect.asVoid, trackDb("feed_cursors.save"))
+  const saveCursor = (eventId: string) =>
+    sql`
+      INSERT INTO feed_cursors (id, event_id) VALUES (1, ${eventId})
+      ON CONFLICT (id) DO UPDATE SET event_id = excluded.event_id
+    `.pipe(Effect.asVoid)
 
-    const clearCursor = sql`DELETE FROM feed_cursors`.pipe(Effect.asVoid, trackDb("feed_cursors.delete"))
+  const clearCursor = sql`DELETE FROM feed_cursors`.pipe(Effect.asVoid)
 
-    /**
-     * Asks for the events after `after`, or from the first event when there's none yet.
-     * With nothing to answer, identity waits for an event, then answers 204: no events.
-     * Its 409 `CURSOR_AHEAD` is `"reset"`: the log was reset, past the cursor.
-     */
-    const fetchPage = (after: string) =>
-      client.get(url, {
-        urlParams: after === "" ? { types: TYPES, limit: PAGE_SIZE } : { types: TYPES, limit: PAGE_SIZE, after }
-      }).pipe(
-        Effect.flatMap(HttpClientResponse.matchStatus({
-          200: (res) => Effect.map(HttpIncomingMessage.schemaBodyJson(Page)(res), (page) => page.events),
-          204: () => Effect.succeed([] as ReadonlyArray<Event>),
-          409: () => Effect.succeed("reset" as const),
-          orElse: (res) => Effect.fail(new LifecycleError({ message: `lifecycle log answered ${res.status}` }))
-        })),
-        Effect.timeout(REQUEST_TIMEOUT)
-      )
-
-    const act = (event: Event): Effect.Effect<void> => {
-      if (event.type === "node.purged" && event.kind === "project" && event.node_id) {
-        return tasks.deleteByProject(event.node_id).pipe(
-          Effect.andThen(log("info", "purged project's tasks deleted", { event_id: event.id, node_id: event.node_id }))
-        )
-      }
-      if (event.type === "user.deleted" && event.user_id) {
-        return profiles.deleteByUserId(event.user_id).pipe(
-          Effect.andThen(log("info", "profile deleted with its account", { event_id: event.id, user_id: event.user_id }))
-        )
-      }
-      return Effect.void
-    }
-
-    /**
-     * Acts on a page and saves its last id as the cursor in one transaction: the deletes and
-     * the cursor commit together or not at all.
-     */
-    const apply = (events: ReadonlyArray<Event>, last: string) =>
-      Effect.forEach(
-        events,
-        (event) =>
-          act(event).pipe(
-            Effect.catchDefect((defect) =>
-              Effect.fail(new LifecycleError({ message: `event ${event.id}: ${messageOf(defect)}` }))
+  const fetchPage = (after: string) =>
+    client.get(url, {
+      urlParams: after === "" ? { types: TYPES, limit: PAGE_SIZE } : { types: TYPES, limit: PAGE_SIZE, after }
+    }).pipe(
+      Effect.flatMap(HttpClientResponse.matchStatus({
+        200: (res) => Effect.map(HttpIncomingMessage.schemaBodyJson(Page)(res), (page) => page.events),
+        204: () => Effect.succeed([] as ReadonlyArray<Event>),
+        409: (res) =>
+          HttpIncomingMessage.schemaBodyJson(ConflictBody)(res).pipe(
+            Effect.flatMap((body) =>
+              body.error.code === "CURSOR_AHEAD"
+                ? Effect.succeed("reset" as const)
+                : Effect.fail(new LifecycleError({ message: `lifecycle log answered 409 (${body.error.code})` }))
+            ),
+            Effect.catchTag(["HttpClientError", "SchemaError"], () =>
+              Effect.fail(new LifecycleError({ message: "lifecycle log answered 409" }))
             )
           ),
-        { discard: true }
-      ).pipe(Effect.andThen(saveCursor(last)), sql.withTransaction)
+        orElse: (res) => Effect.fail(new LifecycleError({ message: `lifecycle log answered ${res.status}` }))
+      })),
+      Effect.timeout(REQUEST_TIMEOUT)
+    )
 
-    /**
-     * Asks once for the events after the saved cursor, acts on them, and saves the cursor
-     * past them in the same transaction as their deletes. A reset log clears the cursor, so
-     * the next step reads from the first event again: safe, as acting twice changes nothing.
-     * A defect is a failure, so it is logged and retried like one.
-     */
-    const step = Effect.gen(function*() {
-      const after = yield* cursor
-      const page = yield* fetchPage(after)
-      if (page === "reset") {
-        yield* log("warn", "the lifecycle log was reset: reading it again from its first event", { after })
-        return yield* clearCursor
-      }
-      const last = page.at(-1)
-      if (last === undefined) return
-      yield* apply(page, last.id)
-      yield* log("info", "lifecycle page read", { events: page.length, after, cursor: last.id })
-    }).pipe(Effect.catchDefect((defect) => Effect.fail(new LifecycleError({ message: messageOf(defect) }))))
-
-    /**
-     * Follows the log until interrupted, which also cancels a read in flight. Whatever came,
-     * it asks again at once: identity waits when there's nothing. An error is logged and the
-     * read asked again after `retry`, from the same cursor.
-     */
-    const run = Effect.gen(function*() {
-      // A failure here fails the first step the same way, and is logged there.
-      yield* cursor.pipe(
-        Effect.flatMap((after) =>
-          after === ""
-            ? log("info", "following the lifecycle log from its first event")
-            : log("info", "following the lifecycle log", { after })
-        ),
-        Effect.ignore
+  const act = (event: Event) => {
+    if (event.type === "node.purged" && event.kind === "project" && event.node_id) {
+      return tasks.deleteByProject(event.node_id).pipe(
+        Effect.andThen(log("info", "purged project's tasks deleted", { event_id: event.id, node_id: event.node_id }))
       )
-      return yield* step.pipe(
-        Effect.tapError((err) =>
-          log("error", "lifecycle read failed", {
-            error_message: err.message,
-            retry_in_ms: Duration.toMillis(Duration.fromInputUnsafe(retry))
-          })
-        ),
-        Effect.retry(Schedule.spaced(retry)),
-        Effect.forever
+    }
+    if (event.type === "user.deleted" && event.user_id) {
+      return profiles.deleteByUserId(event.user_id).pipe(
+        Effect.andThen(log("info", "profile deleted with its account", { event_id: event.id, user_id: event.user_id }))
       )
-    })
+    }
+    return Effect.void
+  }
 
-    return { cursor, step, run } as const
+  const apply = (events: ReadonlyArray<Event>, last: string) =>
+    Effect.forEach(events, act, { discard: true }).pipe(
+      Effect.andThen(saveCursor(last)),
+      sql.withTransaction
+    )
+
+  const step = Effect.gen(function*() {
+    const after = yield* cursor
+    const page = yield* fetchPage(after)
+    if (page === "reset") {
+      yield* log("warn", "the lifecycle log was reset: reading it again from its first event", { after })
+      return yield* clearCursor
+    }
+    const last = page.at(-1)
+    if (last === undefined) return
+    yield* apply(page, last.id)
+    yield* log("info", "lifecycle page read", { events: page.length, after, cursor: last.id })
+  }).pipe(
+    Effect.catchDefect((defect) => Effect.fail(new LifecycleError({ message: messageOf(defect) })))
+  )
+
+  const run = Effect.gen(function*() {
+    yield* cursor.pipe(
+      Effect.flatMap((after) =>
+        after === ""
+          ? log("info", "following the lifecycle log from its first event")
+          : log("info", "following the lifecycle log", { after })
+      ),
+      Effect.ignore
+    )
+    return yield* step.pipe(
+      Effect.tapError((err) =>
+        log("error", "lifecycle read failed", {
+          error_message: messageOf(err),
+          retry_in_ms: Duration.toMillis(Duration.fromInputUnsafe(retry))
+        })
+      ),
+      Effect.retry(Schedule.spaced(retry)),
+      Effect.forever
+    )
   })
-}) {}
 
-/**
- * Follows the log for as long as the app runs. Shutting down interrupts it, cancelling a
- * read in flight, and waits for it before the database closes. With
- * `IDENTITY_INTERNAL_URL` unset the log isn't read, and the app says so once at boot.
- */
+  return { cursor, step, run } as const
+})
+
 export const LifecycleLive = Layer.unwrap(
   Effect.gen(function*() {
     const config = yield* AppConfig
@@ -194,12 +156,12 @@ export const LifecycleLive = Layer.unwrap(
       return Layer.effectDiscard(
         log(
           "warn",
-          "IDENTITY_INTERNAL_URL is unset: not reading identity's lifecycle log, so a purged project's tasks and a deleted person's profile are kept, and a task's assignee can't be checked (503)"
+          "IDENTITY_INTERNAL_URL is unset: lifecycle log disabled and assignee checks will return 503"
         )
       )
     }
     return Layer.effectDiscard(
-      Lifecycle.make(config.identityInternalUrl).pipe(Effect.flatMap(({ run }) => Effect.forkScoped(run)))
-    ).pipe(Layer.provide([TasksRepo.layerNoDeps, ProfilesRepo.layerNoDeps, FetchHttpClient.layer]))
+      makeLifecycle(config.identityInternalUrl).pipe(Effect.flatMap(({ run }) => Effect.forkScoped(run)))
+    )
   })
-).pipe(Layer.provide(SqlLive), Layer.provide(AppConfig.layer))
+)
