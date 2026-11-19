@@ -244,7 +244,7 @@ See `.env.example`. Bun loads `.env` automatically.
 | `OTEL_TRACES_SAMPLER_RATIO` | `1` | Trace sampling ratio, `0` to `1`; parent-based |
 | `OTEL_SDK_DISABLED` | `false` | `true` → no OTLP; stdout + `/metrics` remain |
 
-A telemetry variable that is set but invalid stops the API at boot, naming it ([invalid values](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#invalid-values)).
+A telemetry variable that is set but invalid stops the API at boot, naming it ([telemetry](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md)).
 
 ## Telemetry
 
@@ -252,9 +252,9 @@ Follows Plat5's [`docs/reference/telemetry.md`](https://github.com/plat5dev/plat
 
 | Signal | Path |
 |--------|------|
-| Logs | JSON stdout; access line per request, with `request_id`, and `node_id` and `member_id` on task routes or `user_id` on the profile ([logs](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#logs)) |
+| Logs | JSON stdout; access line per request, with `request_id`, and `node_id` and `member_id` on task routes or `user_id` on the profile |
 | Metrics scrape | Prometheus `/metrics` on `INTERNAL_PORT` |
-| Traces | OTLP HTTP when endpoint set (default); W3C Trace Context, `traceparent` in, and on to identity from each call's client span; HTTP server spans as [the contract](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md#http-server-spans) has them, `src/plat5/Redact.ts` redacting `url.query`; the same ids as `plat5.node_id`, `plat5.member_id`, `plat5.user_id` |
+| Traces | OTLP HTTP when endpoint set (default); W3C Trace Context, `traceparent` in, and on to identity from each call's client span; HTTP server spans (`src/plat5/Redact.ts` redacting `url.query`); the same ids as `plat5.node_id`, `plat5.member_id`, `plat5.user_id` |
 | Metrics OTLP | On when endpoint set (default); set `OTEL_METRICS_EXPORTER=prometheus` to opt out |
 
 ```bash
