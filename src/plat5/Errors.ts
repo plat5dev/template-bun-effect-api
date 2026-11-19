@@ -5,7 +5,6 @@
  * nothing about HTTP. `HttpErrors` are the same errors at the API's edge: each one's
  * endpoint answer, Plat5's envelope with its status. The envelope's `request_id` is the
  * request's `X-Request-ID`, filled in as the error is written, so nothing has to carry it.
- * Each sentence is plat5 docs/reference/error-copy.md's.
  */
 import { Effect, Schema, SchemaGetter } from "effect"
 import { HttpServerResponse } from "effect/http"

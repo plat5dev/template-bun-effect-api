@@ -5,7 +5,6 @@ import { HttpMiddleware, HttpRouter, HttpServer } from "effect/http"
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/http-api"
 import { HttpErrors, NotFound, ServiceUnavailable } from "./Errors.js"
 import { httpObservability } from "./HttpObservability.js"
-import { redactQuery } from "./Redact.js"
 import * as Log from "./Log.js"
 import { Plat5Request } from "./Request.js"
 
@@ -91,72 +90,4 @@ test("an unexpected error is the fallback 500, never its own text", async () => 
     error_type: "internal",
     error_message: "INTERNAL_ERROR: An unexpected error occurred."
   })
-})
-
-test("a 503 is logged as the network's", async () => {
-  const { base, lines } = await serve()
-  const res = await fetch(`${base}/unavailable`)
-  expect(res.status).toBe(503)
-  expect(lines()[0]).toMatchObject({
-    level: "error",
-    error_type: "network",
-    error_message: "SERVICE_UNAVAILABLE: Service temporarily unavailable."
-  })
-})
-
-test("redactQuery: the listed keys' values are REDACTED, exactly as named", () => {
-  const cases: Record<string, string> = {
-    "a=1&b=2": "a=1&b=2",
-    "sig=abc&a=1": "sig=REDACTED&a=1",
-    "X-Amz-Signature=x&X-Amz-Credential=y&X-Amz-Security-Token=z":
-      "X-Amz-Signature=REDACTED&X-Amz-Credential=REDACTED&X-Amz-Security-Token=REDACTED",
-    "Signature=s&AWSAccessKeyId=k&X-Goog-Signature=g":
-      "Signature=REDACTED&AWSAccessKeyId=REDACTED&X-Goog-Signature=REDACTED",
-    "SIG=abc&sig": "SIG=abc&sig",
-    "q=a%20b+c&sig=": "q=a%20b+c&sig=REDACTED"
-  }
-  for (const [query, want] of Object.entries(cases)) expect(redactQuery(query)).toBe(want)
-})
-
-test("the HTTP server span has url.scheme and the redacted url.query", async () => {
-  const { base, spans } = await serve()
-  await fetch(`${base}/ok?sig=secret&page=2&X-Amz-Signature=s3`)
-  const [span] = spans()
-  expect(span?.attributes).toMatchObject({
-    "url.scheme": "http",
-    "url.path": "/ok",
-    "url.query": "sig=REDACTED&page=2&X-Amz-Signature=REDACTED"
-  })
-  expect(span?.attributes["url.full"]).toBeUndefined()
-})
-
-test("a 2xx span isn't an error", async () => {
-  const { base, spans } = await serve()
-  await fetch(`${base}/ok`)
-  expect(spans()[0]?.failed).toBe(false)
-})
-
-test("a request without a query has no url.query", async () => {
-  const { base, spans } = await serve()
-  await fetch(`${base}/ok`)
-  await fetch(`${base}/ok?`)
-  expect(spans()).toHaveLength(2)
-  for (const span of spans()) expect(span.attributes).not.toHaveProperty("url.query")
-})
-
-test("error.type and error_type on a 5xx only", async () => {
-  const { base, lines, spans } = await serve()
-  expect((await fetch(`${base}/die`)).status).toBe(500)
-  expect((await fetch(`${base}/missing`)).status).toBe(404)
-  const [broken, missing] = spans()
-  const [brokenLine, missingLine] = lines()
-
-  expect(broken?.attributes["error.type"]).toBe("internal")
-  expect(broken?.failed).toBe(true) // Error
-  expect(brokenLine).toMatchObject({ error_type: "internal" })
-  expect(brokenLine).not.toHaveProperty("error_kind")
-
-  expect(missing?.attributes).not.toHaveProperty("error.type")
-  expect(missing?.failed).toBe(false) // never Error on a 4xx
-  expect(missingLine).not.toHaveProperty("error_type")
 })

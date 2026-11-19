@@ -84,22 +84,17 @@ const endpoint = (name: string) =>
     name
   ))
 
-/** The variables the resource is layered from (plat5 docs/reference/telemetry.md#resource-identity). */
+/** The variables the resource is layered from. */
 export type ResourceEnv = {
   readonly OTEL_SERVICE_NAME?: string | undefined
-  readonly OTEL_SERVICE_NAMESPACE?: string | undefined
-  readonly OTEL_SERVICE_VERSION?: string | undefined
-  readonly OTEL_SERVICE_INSTANCE_ID?: string | undefined
   readonly HOSTNAME?: string | undefined
-  readonly OTEL_DEPLOYMENT_ENV?: string | undefined
-  readonly DEPLOYMENT_ENV?: string | undefined
   /** OTEL_RESOURCE_ATTRIBUTES, decoded. */
   readonly attributes?: Readonly<Record<string, string>> | undefined
 }
 
 /**
- * The resource, layered: the service's defaults (the build's `version` among them), then
- * OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME, then the convenience variables that are set.
+ * The resource, layered: the service's defaults (the build's `version` among them),
+ * then standard OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME.
  */
 export const serviceResource = (env: ResourceEnv, version: string): Record<string, string> => {
   const resource: Record<string, string> = {
@@ -111,15 +106,6 @@ export const serviceResource = (env: ResourceEnv, version: string): Record<strin
     ...env.attributes
   }
   if (env.OTEL_SERVICE_NAME !== undefined) resource["service.name"] = env.OTEL_SERVICE_NAME
-  const convenience = [
-    ["service.namespace", env.OTEL_SERVICE_NAMESPACE],
-    ["service.version", env.OTEL_SERVICE_VERSION],
-    ["service.instance.id", env.OTEL_SERVICE_INSTANCE_ID],
-    ["deployment.environment", env.OTEL_DEPLOYMENT_ENV ?? env.DEPLOYMENT_ENV]
-  ] as const
-  for (const [key, value] of convenience) {
-    if (value !== undefined) resource[key] = value
-  }
   return resource
 }
 
@@ -176,12 +162,7 @@ export const TelemetryConfig = Config.all({
   metricsHeaders: optional(Config.schema(KeyValues, "OTEL_EXPORTER_OTLP_METRICS_HEADERS")),
   resource: Config.all({
     OTEL_SERVICE_NAME: trimmed("OTEL_SERVICE_NAME"),
-    OTEL_SERVICE_NAMESPACE: trimmed("OTEL_SERVICE_NAMESPACE"),
-    OTEL_SERVICE_VERSION: trimmed("OTEL_SERVICE_VERSION"),
-    OTEL_SERVICE_INSTANCE_ID: trimmed("OTEL_SERVICE_INSTANCE_ID"),
     HOSTNAME: trimmed("HOSTNAME"),
-    OTEL_DEPLOYMENT_ENV: trimmed("OTEL_DEPLOYMENT_ENV"),
-    DEPLOYMENT_ENV: trimmed("DEPLOYMENT_ENV"),
     attributes: optional(Config.schema(KeyValues, "OTEL_RESOURCE_ATTRIBUTES"))
   })
 }).pipe(Config.map((t) => ({

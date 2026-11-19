@@ -110,9 +110,8 @@ test("an invalid telemetry value stops the API at boot, naming the variable", ()
 })
 
 
-// service.version: OTEL_SERVICE_VERSION, then OTEL_RESOURCE_ATTRIBUTES, then the build's
-// VERSION, which is dev without one. CI_COMMIT_TAG plays no part.
-test("service.version: the build's VERSION, else dev; the variables override it", async () => {
+// service.version: OTEL_RESOURCE_ATTRIBUTES, then the build's VERSION (dev without one).
+test("service.version: the build's VERSION, else dev; OTEL_RESOURCE_ATTRIBUTES overrides it", async () => {
   const ci = { CI_COMMIT_TAG: "v9.9.9" }
   expect((await loadOk(ci)).resource["service.version"]).toBe("dev")
   expect(serviceResource({}, "v1.2.3")["service.version"]).toBe("v1.2.3")
@@ -120,36 +119,24 @@ test("service.version: the build's VERSION, else dev; the variables override it"
   const attributes = { "service.version": "v2.0.0" }
   expect(serviceResource({ attributes }, "v1.2.3")["service.version"]).toBe("v2.0.0")
   expect((await loadOk({ ...ci, ...bag })).resource["service.version"]).toBe("v2.0.0")
-  const own = { ...bag, OTEL_SERVICE_VERSION: "v3.0.0" }
-  expect(serviceResource({ attributes, OTEL_SERVICE_VERSION: "v3.0.0" }, "v1.2.3")["service.version"]).toBe("v3.0.0")
-  expect((await loadOk({ ...ci, ...own })).resource["service.version"]).toBe("v3.0.0")
 })
 
-test("the resource: defaults, then OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME, then the convenience variables", async () => {
+test("the resource: defaults, then OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME", async () => {
   const bag = await loadOk({
     HOSTNAME: "host-1",
-    OTEL_RESOURCE_ATTRIBUTES: "service.name=bag,service.namespace=edge,service.instance.id=i-1,team=a%20b"
+    OTEL_RESOURCE_ATTRIBUTES:
+      "service.name=bag,service.namespace=edge,service.instance.id=i-1,deployment.environment=staging,team=a%20b"
   })
   expect(bag.resource).toMatchObject({
     "service.name": "bag",
     "service.namespace": "edge",
     "service.instance.id": "i-1",
-    "deployment.environment": "development",
+    "deployment.environment": "staging",
     team: "a b"
   })
-  const vars = await loadOk({
-    OTEL_RESOURCE_ATTRIBUTES: "service.name=bag,service.namespace=edge,deployment.environment=bag",
-    OTEL_SERVICE_NAME: "named",
-    OTEL_SERVICE_NAMESPACE: "ns",
-    OTEL_SERVICE_INSTANCE_ID: "i-2",
-    DEPLOYMENT_ENV: "staging"
+  const named = await loadOk({
+    OTEL_RESOURCE_ATTRIBUTES: "service.name=bag",
+    OTEL_SERVICE_NAME: "named"
   })
-  expect(vars.resource).toMatchObject({
-    "service.name": "named",
-    "service.namespace": "ns",
-    "service.instance.id": "i-2",
-    "deployment.environment": "staging"
-  })
-  expect((await loadOk({ DEPLOYMENT_ENV: "staging", OTEL_DEPLOYMENT_ENV: "prod" })).resource["deployment.environment"])
-    .toBe("prod")
+  expect(named.resource["service.name"]).toBe("named")
 })
