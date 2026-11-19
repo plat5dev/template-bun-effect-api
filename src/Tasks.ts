@@ -67,7 +67,7 @@ export class TasksRepo extends Context.Service<TasksRepo>()("api/TasksRepo", {
     const insertRow = SqlSchema.findOne({
       Request: Task.insert,
       Result: Task,
-      execute: (row) => sql`INSERT INTO tasks ${sql.insert(row)} RETURNING *`
+      execute: (row) => sql`INSERT INTO tasks ${sql.insert({ ...row, updated_at: row.created_at })} RETURNING *`
     })
 
     const updateRow = SqlSchema.findOneOption({

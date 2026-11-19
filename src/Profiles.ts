@@ -35,7 +35,8 @@ export class ProfilesRepo extends Context.Service<ProfilesRepo>()("api/ProfilesR
 
     const insertIfAbsent = SqlSchema.void({
       Request: Profile.insert,
-      execute: (row) => sql`INSERT INTO profiles ${sql.insert(row)} ON CONFLICT (user_id) DO NOTHING`
+      execute: (row) =>
+        sql`INSERT INTO profiles ${sql.insert({ ...row, updated_at: row.created_at })} ON CONFLICT (user_id) DO NOTHING`
     })
 
     const upsertRow = SqlSchema.findOne({
@@ -43,7 +44,7 @@ export class ProfilesRepo extends Context.Service<ProfilesRepo>()("api/ProfilesR
       Result: Profile,
       execute: (row) =>
         sql`
-          INSERT INTO profiles ${sql.insert(row)}
+          INSERT INTO profiles ${sql.insert({ ...row, updated_at: row.created_at })}
           ON CONFLICT (user_id) DO UPDATE SET bio = excluded.bio, updated_at = excluded.updated_at
           RETURNING *
         `
