@@ -15,8 +15,7 @@ test("feed_cursors holds one cursor, and migrating again keeps it", async () => 
   const dbLayer = SqlLive.pipe(
     Layer.provide(AppConfig.layer),
     Layer.provide(envLayer({
-      DATABASE_PATH: join(dir, "app.db"),
-      TASK_ASSIGNEE_PERMISSION: "project:read"
+      DATABASE_PATH: join(dir, "app.db")
     }))
   )
 

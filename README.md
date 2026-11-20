@@ -28,7 +28,7 @@ To run locally outside Docker (`-x app` points the gateway at your host port 300
 ```bash
 plat5 start -x app
 bun install
-TASK_ASSIGNEE_PERMISSION=project:read bun run dev
+bun run dev
 ```
 
 ## Endpoints
@@ -46,7 +46,7 @@ TASK_ASSIGNEE_PERMISSION=project:read bun run dev
 
 - **Errors** ([`errors.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/errors.md)): Uniform `{ error: { type, code, message, request_id, details } }` envelope for `400`/`404`/`422`/`500`/`503`.
 - **Audit headers** ([`audit.md`](https://github.com/plat5dev/plat5/blob/master/docs/concepts/audit.md)): Writes emit `X-Plat5-Audit-Details` (visible-ASCII JSON, ≤ 4096 bytes) and `POST` emits `X-Plat5-Audit-Created`.
-- **Access evaluation** ([`internal.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/api/internal.md)): Setting an `assignee_id` checks `POST {IDENTITY_INTERNAL_URL}/access/v1/evaluation` for `TASK_ASSIGNEE_PERMISSION` (fail-closed `503`), forwarding `X-Request-ID` and W3C `traceparent`.
+- **Access evaluation** ([`internal.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/api/internal.md)): Setting an `assignee_id` checks `POST {IDENTITY_INTERNAL_URL}/access/v1/evaluation` for `ASSIGNEE_PERMISSION` (`project:read` in `src/Tasks.ts`, fail-closed `503`), forwarding `X-Request-ID` and W3C `traceparent`.
 - **Lifecycle consumer** ([`lifecycle.md`](https://github.com/plat5dev/plat5/blob/master/docs/concepts/lifecycle.md)): Follows `GET {IDENTITY_INTERNAL_URL}/internal/events?types=node.purged,user.deleted&limit=100`, committing deletes + `feed_cursors` in one SQLite transaction, resetting on `409 CURSOR_AHEAD`, and retrying failures after 5s.
 - **Telemetry** ([`telemetry.md`](https://github.com/plat5dev/plat5/blob/master/docs/reference/telemetry.md)): JSON stdout logs (`timestamp`, `level`, `message`, `request_id`, `trace_id`, `span_id`), Prometheus `/metrics`, and opt-in OTLP traces/metrics via Effect's native `OtlpTracer` / `OtlpMetrics` when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
@@ -59,7 +59,6 @@ See `.env.example`.
 | `PORT` / `INTERNAL_PORT` | `3000` / `3001` | Public API and internal health/metrics ports |
 | `DATABASE_PATH` | `./data/app.db` | SQLite database path |
 | `APP_VERSION` | `dev` | Reported as `service.version` (set via `VERSION` build arg in `Dockerfile`) |
-| `TASK_ASSIGNEE_PERMISSION` | **required** | Permission checked for task assignees (e.g. `project:read`) |
 | `IDENTITY_INTERNAL_URL` | unset | Identity internal base URL for assignee checks and lifecycle log |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP HTTP base URL (`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_*_EXPORTER`, `OTEL_TRACES_SAMPLER_RATIO`, `OTEL_SDK_DISABLED` supported) |
 

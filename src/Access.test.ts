@@ -34,7 +34,7 @@ const serveIdentity = (status: number, body: string) => {
 }
 
 const evaluate = (identityUrl: string | undefined, requestId: string, parent?: Tracer.AnySpan) => {
-  const config: Record<string, string> = { TASK_ASSIGNEE_PERMISSION: "project:read" }
+  const config: Record<string, string> = {}
   if (identityUrl !== undefined) config.IDENTITY_INTERNAL_URL = identityUrl
   const request = HttpServerRequest.fromWeb(new Request("http://api/", { headers: { "x-request-id": requestId } }))
   const ask = Effect.flatMap(Access, (access) => access.evaluate(question)).pipe(

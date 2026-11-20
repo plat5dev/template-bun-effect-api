@@ -7,7 +7,6 @@ import { Model } from "effect/schema"
 import { SqlClient, SqlSchema } from "effect/sql"
 import { monotonicFactory } from "ulid"
 import { Access } from "./Access.js"
-import { AppConfig } from "./Config.js"
 import * as Audit from "./plat5/Audit.js"
 import { HttpErrors, NotFound, Plat5Query, Plat5Request, ServiceUnavailable, ValidationFailed } from "./plat5/Errors.js"
 import { ListParams, type Page, pageOf, trim, Ulid } from "./plat5/Pagination.js"
@@ -15,6 +14,8 @@ import { ListParams, type Page, pageOf, trim, Ulid } from "./plat5/Pagination.js
 const ulid = monotonicFactory()
 
 export const MEMBER_HEADER = "x-plat5-member-id"
+/** Permission a task's assignee must hold on the project (matches services/api.yml's read permission). */
+export const ASSIGNEE_PERMISSION = "project:read"
 
 export const TaskId = Schema.String.pipe(Schema.brand("TaskId"))
 export type TaskId = typeof TaskId.Type
@@ -150,14 +151,13 @@ export class Tasks extends Context.Service<Tasks>()("api/Tasks", {
   make: Effect.gen(function*() {
     const repo = yield* TasksRepo
     const access = yield* Access
-    const config = yield* AppConfig
 
     const checkAssignee = Effect.fnUntraced(function*(projectId: string, assigneeId: string) {
       const allowed = yield* access.evaluate({
         memberId: assigneeId,
         kind: "project",
         nodeId: projectId,
-        permission: config.taskAssigneePermission
+        permission: ASSIGNEE_PERMISSION
       }).pipe(Effect.mapError(() => new ServiceUnavailable()))
       if (!allowed) {
         return yield* ValidationFailed.field("assignee_id", "That person can't see this project.")

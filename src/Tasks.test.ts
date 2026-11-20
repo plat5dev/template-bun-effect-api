@@ -8,7 +8,7 @@ import { AppConfig } from "./Config.js"
 import { Api } from "./Http.js"
 import { CREATED_HEADER, DETAILS_HEADER } from "./plat5/Audit.js"
 import { SqlLive } from "./Sql.js"
-import { MEMBER_HEADER, Task, TaskId, Tasks, TasksRepo } from "./Tasks.js"
+import { ASSIGNEE_PERMISSION, MEMBER_HEADER, Task, TaskId, Tasks, TasksRepo } from "./Tasks.js"
 import { envLayer, makeTestApp } from "./testing.js"
 
 const project = "01jd8x3k7q0000000000000000"
@@ -16,7 +16,7 @@ const other = "01jd8x3k7q0000000000000001"
 const member = "01jd8x3k7q00000000000000mm"
 const assignee = "01jd8x3k7q00000000000000aa"
 const user = "01jd8x3k7q00000000000000u1"
-const permission = "tasks:assignable"
+const permission = ASSIGNEE_PERMISSION
 
 const tasksPath = `/projects/${project}/tasks`
 const assigning = JSON.stringify({ title: "Other", assignee_id: assignee })
@@ -79,7 +79,7 @@ const serveIdentity = () => {
 
 const newApp = (opts: { identityUnset?: boolean; tracesExported?: boolean } = {}) => {
   const identity = serveIdentity()
-  const env: Record<string, string> = { TASK_ASSIGNEE_PERMISSION: permission }
+  const env: Record<string, string> = {}
   if (!opts.identityUnset) env.IDENTITY_INTERNAL_URL = identity.url
   if (opts.tracesExported) env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = `${identity.url}/v1/traces`
   const app = makeTestApp(env)
@@ -368,7 +368,7 @@ test("scoped writes return NotFound on racy delete and ignore cross-project upda
     Layer.provide(Access.layer),
     Layer.provide(SqlLive),
     Layer.provide([AppConfig.layer, FetchHttpClient.layer]),
-    Layer.provide(envLayer({ DATABASE_PATH: ":memory:", TASK_ASSIGNEE_PERMISSION: "x" }))
+    Layer.provide(envLayer({ DATABASE_PATH: ":memory:" }))
   )
 
   const result = await Effect.runPromise(

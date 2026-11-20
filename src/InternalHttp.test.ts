@@ -10,7 +10,7 @@ const makeInternalApp = () => {
   const layer = InternalRoutes.pipe(
     Layer.provideMerge(SqlLive),
     Layer.provide([HttpServer.layerServices, AppConfig.layer]),
-    Layer.provide(envLayer({ DATABASE_PATH: ":memory:", TASK_ASSIGNEE_PERMISSION: "project:read" }))
+    Layer.provide(envLayer({ DATABASE_PATH: ":memory:" }))
   )
   const app = HttpRouter.toWebHandler(layer, { disableLogger: true })
   onTestFinished(() => app.dispose())

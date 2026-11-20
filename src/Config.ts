@@ -1,9 +1,7 @@
 /**
  * Application and telemetry configuration loaded via Effect Config.
  */
-import { Config, ConfigProvider, Context, Effect, Layer, Option } from "effect"
-
-const PERMISSION_NAME = /^[a-z0-9:._-]{1,64}$/
+import { Config, Context, Effect, Layer, Option } from "effect"
 
 const optionalString = (name: string): Config.Config<string | undefined> =>
   Config.option(Config.String(name)).pipe(
@@ -15,9 +13,6 @@ const optionalString = (name: string): Config.Config<string | undefined> =>
 
 const optionalTrimmed = (name: string): Config.Config<string | undefined> =>
   optionalString(name).pipe(Config.map((v) => v?.trim() || undefined))
-
-const configError = (message: string) =>
-  new Config.ConfigError(new ConfigProvider.SourceError({ message }))
 
 const parseKeyValues = (raw: string | undefined): Record<string, string> => {
   if (!raw) return {}
@@ -57,7 +52,6 @@ export class AppConfig extends Context.Service<AppConfig, {
   readonly internalPort: number
   readonly databasePath: string
   readonly identityInternalUrl: string | undefined
-  readonly taskAssigneePermission: string
   readonly appVersion: string
 }>()("api/AppConfig") {
   static readonly layer = Layer.effect(
@@ -68,21 +62,13 @@ export class AppConfig extends Context.Service<AppConfig, {
       const databasePath = (yield* optionalString("DATABASE_PATH")) ?? "./data/app.db"
       const rawIdentityUrl = yield* optionalTrimmed("IDENTITY_INTERNAL_URL")
       const identityInternalUrl = rawIdentityUrl?.replace(/\/+$/, "") || undefined
-      const taskAssigneePermission = yield* optionalString("TASK_ASSIGNEE_PERMISSION")
       const appVersion = (yield* optionalTrimmed("APP_VERSION")) ?? "dev"
-
-      if (taskAssigneePermission === undefined || !PERMISSION_NAME.test(taskAssigneePermission)) {
-        return yield* Effect.fail(configError(
-          "TASK_ASSIGNEE_PERMISSION is unset or invalid (must match [a-z0-9:._-]{1,64}, e.g. project:read)"
-        ))
-      }
 
       return AppConfig.of({
         port,
         internalPort,
         databasePath,
         identityInternalUrl,
-        taskAssigneePermission,
         appVersion
       })
     })

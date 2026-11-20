@@ -110,7 +110,7 @@ const setup = async (identity: Identity, url = identity.url, retry: Duration.Inp
     Layer.provideMerge(FetchHttpClient.layer),
     Layer.provideMerge(Log.layer),
     Layer.provide(AppConfig.layer),
-    Layer.provide(envLayer({ DATABASE_PATH: ":memory:", TASK_ASSIGNEE_PERMISSION: "project:read" }))
+    Layer.provide(envLayer({ DATABASE_PATH: ":memory:" }))
   )
 
   const context = await Effect.runPromise(Layer.buildWithScope(TestLayer, scope))

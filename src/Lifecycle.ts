@@ -122,6 +122,7 @@ export const makeLifecycle = Effect.fnUntraced(function*(
     yield* apply(page, last.id)
     yield* log("info", "lifecycle page read", { events: page.length, after, cursor: last.id })
   }).pipe(
+    Effect.withTracerEnabled(false),
     Effect.catchDefect((defect) => Effect.fail(new LifecycleError({ message: messageOf(defect) })))
   )
 

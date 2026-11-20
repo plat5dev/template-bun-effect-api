@@ -18,7 +18,7 @@ export const envLayer = (env: ReadonlyMap<string, string> | Readonly<Record<stri
  */
 export const makeTestApp = (env: Readonly<Record<string, string>> = {}) => {
   const logs = spyOn(console, "log").mockImplementation(() => {})
-  const configEnv = { DATABASE_PATH: ":memory:", TASK_ASSIGNEE_PERMISSION: "project:read", ...env }
+  const configEnv = { DATABASE_PATH: ":memory:", ...env }
 
   const AppLayer = PublicRoutes.pipe(
     Layer.provide(Layer.mergeAll(Profiles.layer, Tasks.layer)),
