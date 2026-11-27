@@ -9,6 +9,5 @@ data
 **/*.test.ts
 src/testing.ts
 plat5*.yml
-routes.operator.yml
 docker-compose.yml
 services
